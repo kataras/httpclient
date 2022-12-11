@@ -279,9 +279,9 @@ func (c *Client) Do(ctx context.Context, method, urlpath string, payload interfa
 
 // DrainResponseBody drains response body and close it, allowing the transport to reuse TCP connections.
 // It's automatically called on Client.ReadXXX methods on the end.
-func DrainResponseBody(resp *http.Response) {
+func DrainResponseBody(resp *http.Response) error {
 	_, _ = io.Copy(io.Discard, resp.Body)
-	resp.Body.Close()
+	return resp.Body.Close()
 }
 
 const (
