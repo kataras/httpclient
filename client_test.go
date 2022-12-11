@@ -38,7 +38,7 @@ func TestClientJSON(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	client.DrainResponseBody(resp)
+	DrainResponseBody(resp)
 }
 
 func sendJSON(t *testing.T, v interface{}) http.HandlerFunc {

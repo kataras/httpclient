@@ -279,7 +279,7 @@ func (c *Client) Do(ctx context.Context, method, urlpath string, payload interfa
 
 // DrainResponseBody drains response body and close it, allowing the transport to reuse TCP connections.
 // It's automatically called on Client.ReadXXX methods on the end.
-func (c *Client) DrainResponseBody(resp *http.Response) {
+func DrainResponseBody(resp *http.Response) {
 	_, _ = io.Copy(io.Discard, resp.Body)
 	resp.Body.Close()
 }
@@ -390,7 +390,7 @@ func (c *Client) ReadJSON(ctx context.Context, dest interface{}, method, urlpath
 	if err != nil {
 		return err
 	}
-	defer c.DrainResponseBody(resp)
+	defer DrainResponseBody(resp)
 
 	if resp.StatusCode >= http.StatusBadRequest {
 		return ExtractError(resp)
@@ -411,7 +411,7 @@ func (c *Client) ReadPlain(ctx context.Context, dest interface{}, method, urlpat
 	if err != nil {
 		return err
 	}
-	defer c.DrainResponseBody(resp)
+	defer DrainResponseBody(resp)
 
 	if resp.StatusCode >= http.StatusBadRequest {
 		return ExtractError(resp)
