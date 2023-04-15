@@ -9,6 +9,7 @@ import (
 	"io"
 	"mime/multipart"
 	"net/http"
+	"net/http/httptrace"
 	"net/url"
 	"os"
 	"strconv"
@@ -172,6 +173,15 @@ func RequestParam(key string, values ...string) RequestOption {
 	return RequestQuery(url.Values{
 		key: values,
 	})
+}
+
+// ClientTrace adds a client trace to the request.
+func ClientTrace(clientTrace *httptrace.ClientTrace) RequestOption {
+	return func(req *http.Request) error {
+		newReq := req.WithContext(httptrace.WithClientTrace(req.Context(), clientTrace))
+		*req = *newReq
+		return nil
+	}
 }
 
 // Do sends an HTTP request and returns an HTTP response.
