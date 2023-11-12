@@ -71,8 +71,8 @@ func New(opts ...Option) *Client {
 }
 
 // Clone returns a new Client with the same options as the original.
-func (c *Client) Clone() *Client {
-	return New(c.opts...)
+func (c *Client) Clone(opts ...Option) *Client {
+	return New(append(c.opts, opts...)...)
 }
 
 // RegisterRequestHandler registers one or more request handlers
