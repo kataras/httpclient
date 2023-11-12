@@ -20,6 +20,8 @@ import (
 
 // A Client is an HTTP client. Initialize with the New package-level function.
 type Client struct {
+	opts []Option // keep for clones.
+
 	HTTPClient *http.Client
 
 	// BaseURL prepends to all requests.
@@ -51,6 +53,7 @@ type Client struct {
 // The default content type to send and receive data is JSON.
 func New(opts ...Option) *Client {
 	c := &Client{
+		opts:                     opts,
 		HTTPClient:               &http.Client{},
 		PersistentRequestOptions: defaultRequestOptions,
 		requestHandlers:          defaultRequestHandlers,
@@ -65,6 +68,11 @@ func New(opts ...Option) *Client {
 	}
 
 	return c
+}
+
+// Clone returns a new Client with the same options as the original.
+func (c *Client) Clone() *Client {
+	return New(c.opts...)
 }
 
 // RegisterRequestHandler registers one or more request handlers
