@@ -59,7 +59,7 @@ func New(opts ...Option) *Client {
 		requestHandlers:          defaultRequestHandlers,
 	}
 
-	for _, opt := range opts {
+	for _, opt := range c.opts { // c.opts in order to make with `NoOption` work.
 		opt(c)
 	}
 
@@ -70,7 +70,13 @@ func New(opts ...Option) *Client {
 	return c
 }
 
+// NoOption is a helper function that clears the previous options in the chain.
+// See `Client.Clone` method.
+var NoOption = func(c *Client) { c.opts = make([]Option, 0) /* clear previous options */ }
+
 // Clone returns a new Client with the same options as the original.
+// If you want to override the options from the base "c" Client,
+// use the `NoOption` variable as the 1st argument.
 func (c *Client) Clone(opts ...Option) *Client {
 	return New(append(c.opts, opts...)...)
 }
