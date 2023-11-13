@@ -419,7 +419,11 @@ func (c *Client) ReadJSON(ctx context.Context, dest interface{}, method, urlpath
 	// println(string(b))
 	// return json.Unmarshal(b, &dest)
 
-	return json.NewDecoder(resp.Body).Decode(&dest)
+	if dest != nil {
+		return json.NewDecoder(resp.Body).Decode(&dest)
+	}
+
+	return nil
 }
 
 // ReadPlain like ReadJSON but it accepts a pointer to a string or byte slice or integer
