@@ -403,8 +403,33 @@ func (c *Client) NewUploader() *Uploader {
 	}
 }
 
+// IsErrEmptyJSON reports whether the given "err" is caused by a
+// Client.ReadJSON call when the request body was empty or
+// didn't start with { or [.
+var IsErrEmptyJSON = func(err error) bool {
+	if err == nil {
+		return false
+	}
+
+	if errors.Is(err, io.EOF) {
+		return true
+	}
+
+	if v, ok := err.(*json.SyntaxError); ok {
+		// standard go json encoder error.
+		return v.Offset == 0 && v.Error() == "unexpected end of JSON input"
+	}
+
+	errMsg := err.Error()
+	// 3rd party pacakges:
+	return strings.Contains(errMsg, "readObjectStart: expect {") || strings.Contains(errMsg, "readArrayStart: expect [")
+}
+
 // ReadJSON binds "dest" to the response's body.
 // After this call, the response body reader is closed.
+//
+// If the response status code is >= 400 then it returns an APIError.
+// If the response body is expected empty sometimes, you can omit the error through IsErrEmptyJSON.
 func (c *Client) ReadJSON(ctx context.Context, dest interface{}, method, urlpath string, payload interface{}, opts ...RequestOption) error {
 	if payload != nil {
 		opts = append(opts, RequestHeader(true, contentTypeKey, contentTypeJSON))
