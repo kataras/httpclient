@@ -303,10 +303,19 @@ func (c *Client) Do(ctx context.Context, method, urlpath string, payload any, op
 }
 
 // DrainResponseBody drains response body and close it, allowing the transport to reuse TCP connections.
+func DrainResponseBody(resp *http.Response) (err error) {
+	_, err = io.Copy(io.Discard, resp.Body)
+	if resp.Body != nil {
+		closeErr := resp.Body.Close()
+		err = errors.Join(err, closeErr) // errors.Join checks for each err != nil, so no further checks needed.
+	}
+	return
+}
+
+// DrainResponseBody drains response body and close it, allowing the transport to reuse TCP connections.
 // It's automatically called on Client.ReadXXX methods on the end.
-func (c *Client) DrainResponseBody(resp *http.Response) {
-	_, _ = io.Copy(io.Discard, resp.Body)
-	resp.Body.Close()
+func (c *Client) DrainResponseBody(resp *http.Response) error {
+	return DrainResponseBody(resp)
 }
 
 const (
