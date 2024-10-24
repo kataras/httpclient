@@ -2,6 +2,7 @@ package httpclient
 
 import (
 	"context"
+	"net"
 	"net/http"
 	"net/http/httputil"
 	"time"
@@ -27,9 +28,39 @@ func BaseURL(uri string) Option {
 // A Timeout of zero means no timeout.
 //
 // Defaults to 15 seconds.
-func Timeout(d time.Duration) Option {
+func Timeout(timeout time.Duration) Option {
 	return func(c *Client) {
-		c.HTTPClient.Timeout = d
+		c.HTTPClient.Timeout = timeout
+	}
+}
+
+// DialTimeout specifies a time limit for creating connections
+// by this Client. It is the maximum amount of time a dial will wait
+// for a connect to complete. If the connection establishing process
+// takes longer than this value, the dial will be cancelled.
+//
+// The timeout includes name resolution, if required.
+// When using TCP, and the host in the address parameter resolves to
+// multiple IP addresses, the timeout is spread over each consecutive
+// dial, such that each is given an appropriate fraction of the time
+// to connect.
+//
+// It overrides the Client's Transport field and the default http.Transport's Dial field,
+// so it can't be used side by side with options like `Handler`.
+func DialTimeout(timeout time.Duration) Option {
+	return func(c *Client) {
+		transport := http.Transport{
+			Dial: func(network string, addr string) (net.Conn, error) {
+				conn, err := net.DialTimeout(network, addr, timeout)
+				if err != nil {
+					// golog.Debugf("%v", err)
+					return nil, err
+				}
+				return conn, err
+			},
+		}
+
+		c.HTTPClient.Transport = &transport
 	}
 }
 

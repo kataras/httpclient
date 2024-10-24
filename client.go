@@ -53,7 +53,8 @@ type Client struct {
 // The default content type to send and receive data is JSON.
 func New(opts ...Option) *Client {
 	c := &Client{
-		opts:                     opts,
+		opts: opts,
+
 		HTTPClient:               &http.Client{},
 		PersistentRequestOptions: defaultRequestOptions,
 		requestHandlers:          defaultRequestHandlers,
@@ -213,7 +214,7 @@ func ClientTrace(clientTrace *httptrace.ClientTrace) RequestOption {
 //
 // Any HTTP returned error will be of type APIError
 // or a timeout error if the given context was canceled.
-func (c *Client) Do(ctx context.Context, method, urlpath string, payload interface{}, opts ...RequestOption) (*http.Response, error) {
+func (c *Client) Do(ctx context.Context, method, urlpath string, payload any, opts ...RequestOption) (*http.Response, error) {
 	if ctx == nil {
 		ctx = context.Background()
 	}
@@ -303,9 +304,9 @@ func (c *Client) Do(ctx context.Context, method, urlpath string, payload interfa
 
 // DrainResponseBody drains response body and close it, allowing the transport to reuse TCP connections.
 // It's automatically called on Client.ReadXXX methods on the end.
-func DrainResponseBody(resp *http.Response) error {
+func (c *Client) DrainResponseBody(resp *http.Response) {
 	_, _ = io.Copy(io.Discard, resp.Body)
-	return resp.Body.Close()
+	resp.Body.Close()
 }
 
 const (
@@ -318,7 +319,7 @@ const (
 )
 
 // JSON writes data as JSON to the server.
-func (c *Client) JSON(ctx context.Context, method, urlpath string, payload interface{}, opts ...RequestOption) (*http.Response, error) {
+func (c *Client) JSON(ctx context.Context, method, urlpath string, payload any, opts ...RequestOption) (*http.Response, error) {
 	opts = append(opts, RequestHeader(true, contentTypeKey, contentTypeJSON))
 	return c.Do(ctx, method, urlpath, payload, opts...)
 }
@@ -373,6 +374,7 @@ func (u *Uploader) AddFile(key, filename string) error {
 	if err != nil {
 		return err
 	}
+	defer source.Close()
 
 	return u.AddFileSource(key, filename, source)
 }
@@ -430,7 +432,7 @@ var IsErrEmptyJSON = func(err error) bool {
 //
 // If the response status code is >= 400 then it returns an APIError.
 // If the response body is expected empty sometimes, you can omit the error through IsErrEmptyJSON.
-func (c *Client) ReadJSON(ctx context.Context, dest interface{}, method, urlpath string, payload interface{}, opts ...RequestOption) error {
+func (c *Client) ReadJSON(ctx context.Context, dest any, method, urlpath string, payload any, opts ...RequestOption) error {
 	if payload != nil {
 		opts = append(opts, RequestHeader(true, contentTypeKey, contentTypeJSON))
 	}
@@ -439,7 +441,7 @@ func (c *Client) ReadJSON(ctx context.Context, dest interface{}, method, urlpath
 	if err != nil {
 		return err
 	}
-	defer DrainResponseBody(resp)
+	defer c.DrainResponseBody(resp)
 
 	if resp.StatusCode >= http.StatusBadRequest {
 		return ExtractError(resp)
@@ -459,12 +461,12 @@ func (c *Client) ReadJSON(ctx context.Context, dest interface{}, method, urlpath
 
 // ReadPlain like ReadJSON but it accepts a pointer to a string or byte slice or integer
 // and it reads the body as plain text.
-func (c *Client) ReadPlain(ctx context.Context, dest interface{}, method, urlpath string, payload interface{}, opts ...RequestOption) error {
+func (c *Client) ReadPlain(ctx context.Context, dest any, method, urlpath string, payload any, opts ...RequestOption) error {
 	resp, err := c.Do(ctx, method, urlpath, payload, opts...)
 	if err != nil {
 		return err
 	}
-	defer DrainResponseBody(resp)
+	defer c.DrainResponseBody(resp)
 
 	if resp.StatusCode >= http.StatusBadRequest {
 		return ExtractError(resp)
@@ -493,7 +495,7 @@ func (c *Client) ReadPlain(ctx context.Context, dest interface{}, method, urlpat
 // GetPlainUnquote reads the response body as raw text and tries to unquote it,
 // useful when the remote server sends a single key as a value but due to backend mistake
 // it sends it as JSON (quoted) instead of plain text.
-func (c *Client) GetPlainUnquote(ctx context.Context, method, urlpath string, payload interface{}, opts ...RequestOption) (string, error) {
+func (c *Client) GetPlainUnquote(ctx context.Context, method, urlpath string, payload any, opts ...RequestOption) (string, error) {
 	var bodyStr string
 	if err := c.ReadPlain(ctx, &bodyStr, method, urlpath, payload, opts...); err != nil {
 		return "", err
@@ -512,7 +514,7 @@ func (c *Client) GetPlainUnquote(ctx context.Context, method, urlpath string, pa
 // content-type and content-length of the original request.
 //
 // Returns the amount of bytes written to "dest".
-func (c *Client) WriteTo(ctx context.Context, dest io.Writer, method, urlpath string, payload interface{}, opts ...RequestOption) (int64, error) {
+func (c *Client) WriteTo(ctx context.Context, dest io.Writer, method, urlpath string, payload any, opts ...RequestOption) (int64, error) {
 	if payload != nil {
 		opts = append(opts, RequestHeader(true, contentTypeKey, contentTypeJSON))
 	}
@@ -541,7 +543,7 @@ func (c *Client) WriteTo(ctx context.Context, dest io.Writer, method, urlpath st
 // Note that this is strict in order to catch bad actioners fast,
 // e.g. it wont try to read plain text if not specified on
 // the response headers and the dest is a *string.
-func BindResponse(resp *http.Response, dest interface{}) (err error) {
+func BindResponse(resp *http.Response, dest any) (err error) {
 	contentType := trimHeader(resp.Header.Get(contentTypeKey))
 	switch contentType {
 	case contentTypeJSON: // the most common scenario on successful responses.
