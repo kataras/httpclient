@@ -199,6 +199,34 @@ func ClientTrace(clientTrace *httptrace.ClientTrace) RequestOption {
 	}
 }
 
+// RequestRateLimit sets the rate limit for specific request(s) per second.
+// Note that this is a blocking option, so it will wait
+// until the rate limit is reached before sending the request.
+// This is useful for specific endpoints that have a rate limit and you want to
+// avoid hitting it too hard.
+func RequestRateLimit(requestsPerSecond int) RequestOption {
+	limiter := rate.NewLimiter(rate.Limit(requestsPerSecond), requestsPerSecond)
+	return func(req *http.Request) error {
+
+		if err := limiter.Wait(req.Context()); err != nil {
+			return err
+		}
+		return nil
+	}
+}
+
+// RequestRateLimitPerMinute sets the rate limit for specific request(s) per minute.
+// See `RequestRateLimit` for more details.
+func RequestRateLimitPerMinute(requestsPerMinute int) RequestOption {
+	limiter := rate.NewLimiter(rate.Limit(requestsPerMinute*60), requestsPerMinute)
+	return func(req *http.Request) error {
+		if err := limiter.Wait(req.Context()); err != nil {
+			return err
+		}
+		return nil
+	}
+}
+
 // Do sends an HTTP request and returns an HTTP response.
 //
 // The payload can be:

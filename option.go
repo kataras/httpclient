@@ -92,6 +92,13 @@ func RateLimit(requestsPerSecond int) Option {
 	}
 }
 
+// RateLimitPerMinute configures the rate limit for requests per minute.
+func RateLimitPerMinute(requestsPerMinute int) Option {
+	return func(c *Client) {
+		c.rateLimiter = rate.NewLimiter(rate.Limit(requestsPerMinute*60), requestsPerMinute)
+	}
+}
+
 type DebugLogger interface {
 	Debugf(string, ...interface{})
 }
