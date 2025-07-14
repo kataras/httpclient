@@ -207,7 +207,6 @@ func ClientTrace(clientTrace *httptrace.ClientTrace) RequestOption {
 func RequestRateLimit(requestsPerSecond int) RequestOption {
 	limiter := rate.NewLimiter(rate.Limit(requestsPerSecond), requestsPerSecond)
 	return func(req *http.Request) error {
-
 		if err := limiter.Wait(req.Context()); err != nil {
 			return err
 		}
@@ -218,7 +217,8 @@ func RequestRateLimit(requestsPerSecond int) RequestOption {
 // RequestRateLimitPerMinute sets the rate limit for specific request(s) per minute.
 // See `RequestRateLimit` for more details.
 func RequestRateLimitPerMinute(requestsPerMinute int) RequestOption {
-	limiter := rate.NewLimiter(rate.Limit(requestsPerMinute*60), requestsPerMinute)
+	ratePerSecond := rate.Limit(float64(requestsPerMinute) / 60.0)
+	limiter := rate.NewLimiter(ratePerSecond, requestsPerMinute)
 	return func(req *http.Request) error {
 		if err := limiter.Wait(req.Context()); err != nil {
 			return err
