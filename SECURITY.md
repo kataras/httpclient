@@ -9,6 +9,6 @@ which acts as a code migration assistant.
 ## Reporting a Vulnerability
 
 Please report (suspected) security vulnerabilities to
-**[kataras2006@hotmail.com](mailto:kataras2006@hotmail.com)**. You will receive a response from
+**[omicronmakis@gmail.com](mailto:omicronmakis@gmail.com)**. You will receive a response from
 us within 3-4 working days. If the issue is confirmed, we will release a new minor version as soon
 as possible depending on complexity but historically within a few hours or days.

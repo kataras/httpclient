@@ -5,6 +5,7 @@ import (
 	"net"
 	"net/http"
 	"net/http/httputil"
+	"strings"
 	"time"
 
 	"golang.org/x/time/rate"
@@ -18,7 +19,7 @@ type Option = func(*Client)
 // All of its methods will prepend this url.
 func BaseURL(uri string) Option {
 	return func(c *Client) {
-		c.BaseURL = uri
+		c.BaseURL = strings.TrimSuffix(uri, "/")
 	}
 }
 
@@ -100,7 +101,7 @@ func RateLimitPerMinute(requestsPerMinute int) Option {
 }
 
 type DebugLogger interface {
-	Debugf(string, ...interface{})
+	Debugf(string, ...any)
 }
 
 // Debug enables the client's debug logger.
