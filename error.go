@@ -2,6 +2,7 @@ package httpclient
 
 import (
 	"encoding/json"
+	"errors"
 	"io"
 	"net/http"
 	"strings"
@@ -11,13 +12,21 @@ import (
 type APIError struct {
 	Response *http.Response
 	Body     json.RawMessage // may be any []byte, response body is closed at this point.
+	// URL is the request URL as it should be displayed, with the values of any
+	// query parameters registered through RedactQueryParams replaced by "REDACTED".
+	// Empty when the error was built by the package-level ExtractError.
+	URL string
 }
 
 // Error implements the standard error type.
 func (e APIError) Error() string {
 	var b strings.Builder
 	if e.Response != nil {
-		b.WriteString(e.Response.Request.URL.String())
+		if e.URL != "" {
+			b.WriteString(e.URL)
+		} else if e.Response.Request != nil && e.Response.Request.URL != nil {
+			b.WriteString(e.Response.Request.URL.String())
+		}
 		b.WriteByte(':')
 		b.WriteByte(' ')
 
@@ -47,14 +56,25 @@ func ExtractError(resp *http.Response) APIError {
 	}
 }
 
-// GetError reports whether the given "err" is an APIError.
+// extractError is like ExtractError but renders the request URL through
+// the Client's RedactQueryParams configuration.
+func (c *Client) extractError(resp *http.Response) APIError {
+	apiErr := ExtractError(resp)
+	if resp.Request != nil {
+		apiErr.URL = RedactURL(resp.Request.URL, c.redactQueryParams...)
+	}
+
+	return apiErr
+}
+
+// GetError reports whether the given "err" is, or wraps, an APIError.
 func GetError(err error) (APIError, bool) {
 	if err == nil {
 		return APIError{}, false
 	}
 
-	apiErr, ok := err.(APIError)
-	if !ok {
+	var apiErr APIError
+	if !errors.As(err, &apiErr) {
 		return APIError{}, false
 	}
 

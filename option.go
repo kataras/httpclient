@@ -50,15 +50,9 @@ func Timeout(timeout time.Duration) Option {
 // so it can't be used side by side with options like `Handler`.
 func DialTimeout(timeout time.Duration) Option {
 	return func(c *Client) {
+		dialer := &net.Dialer{Timeout: timeout}
 		transport := http.Transport{
-			Dial: func(network string, addr string) (net.Conn, error) {
-				conn, err := net.DialTimeout(network, addr, timeout)
-				if err != nil {
-					// golog.Debugf("%v", err)
-					return nil, err
-				}
-				return conn, err
-			},
+			DialContext: dialer.DialContext,
 		}
 
 		c.HTTPClient.Transport = &transport
@@ -72,7 +66,7 @@ func DialTimeout(timeout time.Duration) Option {
 // which allows "fake calls" to the "h" server. Use it for testing.
 func Handler(h http.Handler) Option {
 	return func(c *Client) {
-		c.HTTPClient.Transport = new(handlerTransport)
+		c.HTTPClient.Transport = &handlerTransport{handler: h}
 	}
 }
 
@@ -96,7 +90,8 @@ func RateLimit(requestsPerSecond int) Option {
 // RateLimitPerMinute configures the rate limit for requests per minute.
 func RateLimitPerMinute(requestsPerMinute int) Option {
 	return func(c *Client) {
-		c.rateLimiter = rate.NewLimiter(rate.Limit(requestsPerMinute*60), requestsPerMinute)
+		ratePerSecond := rate.Limit(float64(requestsPerMinute) / 60.0)
+		c.rateLimiter = rate.NewLimiter(ratePerSecond, requestsPerMinute)
 	}
 }
 
@@ -130,18 +125,31 @@ type DebugLogger interface {
 //	{
 //	    "firstname": "Makis"
 //	}
+//
+// Values of query parameters registered through RedactQueryParams
+// are replaced by "REDACTED" in the output.
 func Debug(logger DebugLogger) Option {
-	handler := &debugRequestHandler{
-		logger: logger,
-	}
-
 	return func(c *Client) {
+		handler := &debugRequestHandler{
+			logger: logger,
+			client: c,
+		}
+
 		c.requestHandlers = append(c.requestHandlers, handler)
 	}
 }
 
 type debugRequestHandler struct {
 	logger DebugLogger
+	client *Client // to read the redaction configuration at request time.
+}
+
+func (h *debugRequestHandler) redact(text string, req *http.Request) string {
+	if h.client == nil {
+		return text
+	}
+
+	return redactText(text, req, h.client.redactQueryParams)
 }
 
 func (h *debugRequestHandler) BeginRequest(ctx context.Context, req *http.Request) error {
@@ -150,21 +158,26 @@ func (h *debugRequestHandler) BeginRequest(ctx context.Context, req *http.Reques
 		return err
 	}
 
-	h.logger.Debugf(string(dump))
+	h.logger.Debugf(h.redact(string(dump), req))
 	return nil
 }
 
 func (h *debugRequestHandler) EndRequest(ctx context.Context, resp *http.Response, err error) error {
 	if err != nil {
-		h.logger.Debugf("%s: %s: ERR: %s", resp.Request.Method, resp.Request.URL.String(), err.Error())
+		if resp != nil && resp.Request != nil {
+			h.logger.Debugf("%s: %s: ERR: %s", resp.Request.Method, h.redact(resp.Request.URL.String(), resp.Request), err.Error())
+		} else {
+			// Transport errors (dial, TLS, timeout) carry no response.
+			h.logger.Debugf("HTTP Client: ERR: %s", err.Error())
+		}
 	} else {
 		dump, err := httputil.DumpResponse(resp, true)
 		if err != nil {
 			return err
 		}
 
-		h.logger.Debugf(string(dump))
+		h.logger.Debugf(h.redact(string(dump), resp.Request))
 	}
 
-	return err
+	return nil // observers never abort the call.
 }

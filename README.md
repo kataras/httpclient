@@ -56,12 +56,48 @@ func (c *Client) GetCurrentByCity(ctx context.Context, city string) (resp Respon
 Some of the features HTTP Client offers:
 
 * Rate Limit
+* Retry with backoff
+* Secret redaction in errors and debug output
 * Middleware
 * JSON (read & write)
 * Forms
 * File Upload
 * Plain Text
 * Debug and more...
+
+### Retries
+
+Retrying is opt-in. Pass a `RetryPolicy` and failed attempts are repeated with exponential backoff (a `Retry-After` response header wins when present). By default only network errors on idempotent methods and the 429, 502, 503 and 504 statuses are retried; buffered request bodies are replayed automatically.
+
+```go
+c := httpclient.New(
+	httpclient.BaseURL(BaseURL),
+	httpclient.RateLimit(20),
+	httpclient.Retry(httpclient.RetryPolicy{
+		MaxAttempts:    3,
+		InitialBackoff: 500 * time.Millisecond,
+		MaxBackoff:     10 * time.Second,
+		Jitter:         true,
+	}),
+)
+```
+
+Every attempt waits on the rate limiter and is visible to the registered request handlers, so `Debug` output shows the failed attempts as well.
+
+### Redacting secrets
+
+When the API key travels in the query string it would otherwise be printed by `APIError.Error()` and by the `Debug` dumps. Register the parameter names once and their values are replaced with `REDACTED` in all rendered text. The request itself is not modified.
+
+```go
+c := httpclient.New(
+	httpclient.BaseURL(BaseURL),
+	httpclient.PersistentRequestOptions(httpclient.RequestParam("apiKey", opts.APIKey)),
+	httpclient.RedactQueryParams("apiKey"),
+	httpclient.Debug(golog.Default),
+)
+```
+
+`httpclient.RedactURL(u, "apiKey")` is available for your own log lines.
 
 ## 📖 Learning HTTP Client
 

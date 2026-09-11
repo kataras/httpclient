@@ -36,6 +36,13 @@ type Client struct {
 	// Optional handlers that are being fired before and after each new request.
 	requestHandlers []RequestHandler
 
+	// Query parameter names whose values are scrubbed from error messages
+	// and debug output. See the RedactQueryParams option.
+	redactQueryParams []string
+
+	// Optional retry policy, see the Retry option. Nil disables retrying.
+	retry *RetryPolicy
+
 	// store it here for future use.
 	keepAlive bool
 }
@@ -44,8 +51,13 @@ type Client struct {
 // Available options:
 // - BaseURL
 // - Timeout
+// - DialTimeout
+// - Handler
 // - PersistentRequestOptions
-// - RateLimit
+// - RateLimit, RateLimitPerMinute
+// - Retry
+// - RedactQueryParams
+// - Debug
 //
 // Look the Client.Do/JSON/... methods to send requests and
 // ReadXXX methods to read responses.
@@ -119,19 +131,24 @@ func (c *Client) emitBeginRequest(ctx context.Context, req *http.Request) error 
 	return nil
 }
 
+// emitEndRequest fires the EndRequest handlers. It returns the first error a
+// handler produced on its own; a handler that simply passes "err" back through
+// is not treated as aborting the call.
 func (c *Client) emitEndRequest(ctx context.Context, resp *http.Response, err error) error {
-	if len(c.requestHandlers) == 0 {
-		return nil
-	}
-
 	for _, h := range c.requestHandlers {
-		if hErr := h.EndRequest(ctx, resp, err); hErr != nil {
+		if hErr := h.EndRequest(ctx, resp, err); hErr != nil && hErr != err { //nolint:errorlint // identity on purpose, see doc.
 			return hErr
 		}
 	}
 
-	return err
+	return nil
 }
+
+// handlerError marks an error returned by a RequestHandler, which aborts the
+// whole Do call regardless of any retry policy.
+type handlerError struct{ error }
+
+func (e handlerError) Unwrap() error { return e.error }
 
 // RequestOption declares the type of option one can pass
 // to the Do methods(JSON, Form, ReadJSON...).
@@ -247,12 +264,6 @@ func (c *Client) Do(ctx context.Context, method, urlpath string, payload any, op
 		ctx = context.Background()
 	}
 
-	if c.rateLimiter != nil {
-		if err := c.rateLimiter.Wait(ctx); err != nil {
-			return nil, err
-		}
-	}
-
 	// Method defaults to GET.
 	if method == "" {
 		method = http.MethodGet
@@ -315,16 +326,67 @@ func (c *Client) Do(ctx context.Context, method, urlpath string, payload any, op
 		}
 	}
 
-	if err = c.emitBeginRequest(ctx, req); err != nil {
-		return nil, err
+	for attempt := 1; ; attempt++ {
+		if attempt > 1 && !rewindBody(req) {
+			// The body was consumed and cannot be reproduced (raw io.Reader payload);
+			// the previous result is already returned below.
+			break
+		}
+
+		resp, respErr := c.attempt(ctx, req)
+		var hErr handlerError
+		if errors.As(respErr, &hErr) {
+			// A request handler aborted the call; this is not a transport failure.
+			return nil, hErr.error
+		}
+
+		if c.retry == nil || attempt >= c.retry.MaxAttempts || !c.retry.shouldRetry(req, resp, respErr) {
+			return resp, respErr
+		}
+
+		wait := c.retry.wait(attempt, resp)
+		if c.retry.OnRetry != nil {
+			c.retry.OnRetry(attempt, req, resp, respErr, wait)
+		}
+
+		if resp != nil {
+			_ = DrainResponseBody(resp) // release the connection before retrying.
+		}
+
+		if req.Body != nil && req.Body != http.NoBody && req.GetBody == nil {
+			// Cannot replay the body: give the caller the result we have.
+			return resp, respErr
+		}
+
+		if err := sleepContext(ctx, wait); err != nil {
+			return nil, err
+		}
+	}
+
+	return nil, errors.New("client.Do: unreachable")
+}
+
+// attempt performs a single round trip: it waits on the rate limiter, fires the
+// BeginRequest handlers, sends the request and fires the EndRequest handlers.
+// An error produced by a request handler is returned as a handlerError, which
+// aborts the whole call regardless of any retry policy.
+func (c *Client) attempt(ctx context.Context, req *http.Request) (*http.Response, error) {
+	if c.rateLimiter != nil {
+		if err := c.rateLimiter.Wait(ctx); err != nil {
+			return nil, err
+		}
+	}
+
+	if err := c.emitBeginRequest(ctx, req); err != nil {
+		return nil, handlerError{err}
 	}
 
 	// Caller is responsible for closing the response body.
 	// Also note that the gzip compression is handled automatically nowadays.
 	resp, respErr := c.HTTPClient.Do(req)
 
-	if err = c.emitEndRequest(ctx, resp, respErr); err != nil {
-		return nil, err
+	if err := c.emitEndRequest(ctx, resp, respErr); err != nil {
+		return nil, handlerError{err}
 	}
 
 	return resp, respErr
@@ -481,7 +543,7 @@ func (c *Client) ReadJSON(ctx context.Context, dest any, method, urlpath string,
 	defer c.DrainResponseBody(resp)
 
 	if resp.StatusCode >= http.StatusBadRequest {
-		return ExtractError(resp)
+		return c.extractError(resp)
 	}
 
 	// DBUG
@@ -506,7 +568,7 @@ func (c *Client) ReadPlain(ctx context.Context, dest any, method, urlpath string
 	defer c.DrainResponseBody(resp)
 
 	if resp.StatusCode >= http.StatusBadRequest {
-		return ExtractError(resp)
+		return c.extractError(resp)
 	}
 
 	body, err := io.ReadAll(resp.Body)
