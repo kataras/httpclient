@@ -7,11 +7,11 @@ import (
 	"net/http/httputil"
 	"strings"
 	"time"
-
-	"golang.org/x/time/rate"
 )
 
 // All the builtin client options should live here, for easy discovery.
+// Rate limiting lives in ratelimit.go, redaction in redact.go,
+// retrying in retry.go and JSON configuration in json.go.
 
 type Option = func(*Client)
 
@@ -28,7 +28,8 @@ func BaseURL(uri string) Option {
 // redirects, and reading the response body.
 // A Timeout of zero means no timeout.
 //
-// Defaults to 15 seconds.
+// There is no default: without this option a request runs until the server
+// answers or the context is done. Set one for anything talking to the internet.
 func Timeout(timeout time.Duration) Option {
 	return func(c *Client) {
 		c.HTTPClient.Timeout = timeout
@@ -46,16 +47,39 @@ func Timeout(timeout time.Duration) Option {
 // dial, such that each is given an appropriate fraction of the time
 // to connect.
 //
-// It overrides the Client's Transport field and the default http.Transport's Dial field,
-// so it can't be used side by side with options like `Handler`.
+// It sets the dialer of the Client's *http.Transport, creating one when the
+// Client has no transport yet. A Client whose transport is not an
+// *http.Transport, such as one built by the Handler option, is left alone.
 func DialTimeout(timeout time.Duration) Option {
 	return func(c *Client) {
 		dialer := &net.Dialer{Timeout: timeout}
-		transport := http.Transport{
-			DialContext: dialer.DialContext,
-		}
 
-		c.HTTPClient.Transport = &transport
+		switch transport := c.HTTPClient.Transport.(type) {
+		case nil:
+			c.HTTPClient.Transport = &http.Transport{DialContext: dialer.DialContext}
+		case *http.Transport:
+			// Keep whatever else was configured on it.
+			transport.DialContext = dialer.DialContext
+		default:
+			// A custom RoundTripper does its own dialing; nothing to set.
+		}
+	}
+}
+
+// Transport sets the http.RoundTripper the Client sends through.
+//
+// Use it to plug in an instrumented transport, a recorded one, or the transport
+// of an httptest.NewTestServer, whose in-memory network the default transport
+// cannot reach:
+//
+//	srv := httptest.NewTestServer(t, mux)
+//	c := httpclient.New(httpclient.BaseURL(srv.URL), httpclient.Transport(srv.Client().Transport))
+//
+// Transport, DialTimeout and Handler all write the same field. The last one
+// given wins, except that DialTimeout only adjusts an *http.Transport.
+func Transport(rt http.RoundTripper) Option {
+	return func(c *Client) {
+		c.HTTPClient.Transport = rt
 	}
 }
 
@@ -64,6 +88,9 @@ func DialTimeout(timeout time.Duration) Option {
 //
 // It registers a custom HTTP client transport
 // which allows "fake calls" to the "h" server. Use it for testing.
+//
+// It replaces the Client's transport, so a DialTimeout given before it has no
+// effect and one given after it is ignored.
 func Handler(h http.Handler) Option {
 	return func(c *Client) {
 		c.HTTPClient.Transport = &handlerTransport{handler: h}
@@ -75,23 +102,6 @@ func Handler(h http.Handler) Option {
 func PersistentRequestOptions(reqOpts ...RequestOption) Option {
 	return func(c *Client) {
 		c.PersistentRequestOptions = append(c.PersistentRequestOptions, reqOpts...)
-	}
-}
-
-// RateLimit configures the rate limit for requests.
-//
-// Defaults to zero which disables rate limiting.
-func RateLimit(requestsPerSecond int) Option {
-	return func(c *Client) {
-		c.rateLimiter = rate.NewLimiter(rate.Limit(requestsPerSecond), requestsPerSecond)
-	}
-}
-
-// RateLimitPerMinute configures the rate limit for requests per minute.
-func RateLimitPerMinute(requestsPerMinute int) Option {
-	return func(c *Client) {
-		ratePerSecond := rate.Limit(float64(requestsPerMinute) / 60.0)
-		c.rateLimiter = rate.NewLimiter(ratePerSecond, requestsPerMinute)
 	}
 }
 
@@ -126,8 +136,9 @@ type DebugLogger interface {
 //	    "firstname": "Makis"
 //	}
 //
-// Values of query parameters registered through RedactQueryParams
-// are replaced by "REDACTED" in the output.
+// Values of query parameters registered through RedactQueryParams,
+// and the credentials of any Authorization header, are replaced
+// by "REDACTED" in the output.
 func Debug(logger DebugLogger) Option {
 	return func(c *Client) {
 		handler := &debugRequestHandler{
@@ -149,7 +160,7 @@ func (h *debugRequestHandler) redact(text string, req *http.Request) string {
 		return text
 	}
 
-	return redactText(text, req, h.client.redactQueryParams)
+	return redactText(text, req, h.client.redactQueryParams, h.client.redactHeaders)
 }
 
 func (h *debugRequestHandler) BeginRequest(ctx context.Context, req *http.Request) error {
@@ -158,26 +169,30 @@ func (h *debugRequestHandler) BeginRequest(ctx context.Context, req *http.Reques
 		return err
 	}
 
-	h.logger.Debugf(h.redact(string(dump), req))
+	// The dump is data, never a format string: it carries percent signs from
+	// percent-encoded URLs and from response bodies.
+	h.logger.Debugf("%s", h.redact(string(dump), req))
 	return nil
 }
 
 func (h *debugRequestHandler) EndRequest(ctx context.Context, resp *http.Response, err error) error {
 	if err != nil {
 		if resp != nil && resp.Request != nil {
-			h.logger.Debugf("%s: %s: ERR: %s", resp.Request.Method, h.redact(resp.Request.URL.String(), resp.Request), err.Error())
+			h.logger.Debugf("%s: %s: ERR: %s", resp.Request.Method,
+				h.redact(resp.Request.URL.String(), resp.Request), err.Error())
 		} else {
 			// Transport errors (dial, TLS, timeout) carry no response.
 			h.logger.Debugf("HTTP Client: ERR: %s", err.Error())
 		}
-	} else {
-		dump, err := httputil.DumpResponse(resp, true)
-		if err != nil {
-			return err
-		}
 
-		h.logger.Debugf(h.redact(string(dump), resp.Request))
+		return nil // observers never abort the call.
 	}
 
-	return nil // observers never abort the call.
+	dump, dumpErr := httputil.DumpResponse(resp, true)
+	if dumpErr != nil {
+		return dumpErr
+	}
+
+	h.logger.Debugf("%s", h.redact(string(dump), resp.Request))
+	return nil
 }

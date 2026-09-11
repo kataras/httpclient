@@ -3,19 +3,17 @@ package httpclient
 import (
 	"bytes"
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
-	"mime/multipart"
 	"net/http"
-	"net/http/httptrace"
 	"net/url"
-	"os"
-	"strconv"
+	"slices"
 	"strings"
 
 	"golang.org/x/time/rate"
+
+	jsonv1 "encoding/json"
 )
 
 // A Client is an HTTP client. Initialize with the New package-level function.
@@ -30,8 +28,11 @@ type Client struct {
 	// A list of persistent request options.
 	PersistentRequestOptions []RequestOption
 
-	// Optional rate limiter instance initialized by the RateLimit method.
+	// Optional rate limiter instance initialized by the RateLimit option.
 	rateLimiter *rate.Limiter
+
+	// Optional named rate limiters, see the RateLimitFor option.
+	keyedLimiters map[string]*rate.Limiter
 
 	// Optional handlers that are being fired before and after each new request.
 	requestHandlers []RequestHandler
@@ -40,58 +41,74 @@ type Client struct {
 	// and debug output. See the RedactQueryParams option.
 	redactQueryParams []string
 
+	// Extra header names whose values are scrubbed from debug output.
+	// See the RedactHeaders option.
+	redactHeaders []string
+
 	// Optional retry policy, see the Retry option. Nil disables retrying.
 	retry *RetryPolicy
 
-	// store it here for future use.
-	keepAlive bool
+	// encoding/json/v2 options, see the JSONOptions option.
+	jsonOptions jsonOptions
 }
 
 // New returns a new HTTP Client.
 // Available options:
-// - BaseURL
-// - Timeout
-// - DialTimeout
-// - Handler
-// - PersistentRequestOptions
-// - RateLimit, RateLimitPerMinute
-// - Retry
-// - RedactQueryParams
-// - Debug
+//   - BaseURL
+//   - Timeout
+//   - DialTimeout
+//   - Transport
+//   - Handler
+//   - PersistentRequestOptions
+//   - RateLimit, RateLimitPerMinute
+//   - RateLimitFor, RateLimitForPerMinute
+//   - Retry
+//   - RedactQueryParams, RedactHeaders
+//   - JSONOptions
+//   - Debug
 //
-// Look the Client.Do/JSON/... methods to send requests and
-// ReadXXX methods to read responses.
+// Look the Client.Do/JSON/... methods to send requests,
+// the Client.BindXXX methods to receive typed responses and
+// the Client.ReadXXX methods to fill a value you already hold.
 //
 // The default content type to send and receive data is JSON.
 func New(opts ...Option) *Client {
 	c := &Client{
-		opts: opts,
-
 		HTTPClient:               &http.Client{},
-		PersistentRequestOptions: defaultRequestOptions,
-		requestHandlers:          defaultRequestHandlers,
+		PersistentRequestOptions: slices.Clone(defaultRequestOptions),
+		requestHandlers:          cloneDefaultRequestHandlers(),
+		jsonOptions:              defaultJSONOptions(),
 	}
 
-	for _, opt := range c.opts { // c.opts in order to make with `NoOption` work.
+	// Record each option as it is applied, so that NoOption clears only what
+	// came before it and a Clone of a Clone keeps the later options.
+	c.opts = make([]Option, 0, len(opts))
+	for _, opt := range opts {
+		if opt == nil {
+			continue
+		}
+
 		opt(c)
-	}
-
-	if transport, ok := c.HTTPClient.Transport.(*http.Transport); ok {
-		c.keepAlive = !transport.DisableKeepAlives
+		c.opts = append(c.opts, opt)
 	}
 
 	return c
 }
 
 // NoOption is a helper function that clears the previous options in the chain.
-// See `Client.Clone` method.
-var NoOption = func(c *Client) { c.opts = make([]Option, 0) /* clear previous options */ }
+// See the Client.Clone method.
+var NoOption = func(c *Client) { c.opts = c.opts[:0] /* clear previous options */ }
 
 // Clone returns a new Client with the same options as the original.
 // If you want to override the options from the base "c" Client,
-// use the `NoOption` variable as the 1st argument.
+// use the NoOption variable as the 1st argument.
+//
+// The clone is independent: it builds its own rate limiters and carries
+// its own request handler list.
 func (c *Client) Clone(opts ...Option) *Client {
-	return New(append(c.opts, opts...)...)
+	// slices.Concat always allocates, so sibling clones cannot overwrite
+	// each other through a shared backing array.
+	return New(slices.Concat(c.opts, opts)...)
 }
 
 // RegisterRequestHandler registers one or more request handlers
@@ -105,23 +122,16 @@ func (c *Client) Clone(opts ...Option) *Client {
 //
 // Any request handlers MUST be set right after the Client's initialization.
 func (c *Client) RegisterRequestHandler(reqHandlers ...RequestHandler) {
-	reqHandlersToRegister := make([]RequestHandler, 0, len(reqHandlers))
 	for _, h := range reqHandlers {
 		if h == nil {
 			continue
 		}
 
-		reqHandlersToRegister = append(reqHandlersToRegister, h)
+		c.requestHandlers = append(c.requestHandlers, h)
 	}
-
-	c.requestHandlers = append(c.requestHandlers, reqHandlersToRegister...)
 }
 
 func (c *Client) emitBeginRequest(ctx context.Context, req *http.Request) error {
-	if len(c.requestHandlers) == 0 {
-		return nil
-	}
-
 	for _, h := range c.requestHandlers {
 		if hErr := h.BeginRequest(ctx, req); hErr != nil {
 			return hErr
@@ -132,13 +142,20 @@ func (c *Client) emitBeginRequest(ctx context.Context, req *http.Request) error 
 }
 
 // emitEndRequest fires the EndRequest handlers. It returns the first error a
-// handler produced on its own; a handler that simply passes "err" back through
-// is not treated as aborting the call.
+// handler produced on its own. A handler that passes "err" back through, wrapped
+// or not, is not treated as aborting the call.
 func (c *Client) emitEndRequest(ctx context.Context, resp *http.Response, err error) error {
 	for _, h := range c.requestHandlers {
-		if hErr := h.EndRequest(ctx, resp, err); hErr != nil && hErr != err { //nolint:errorlint // identity on purpose, see doc.
-			return hErr
+		hErr := h.EndRequest(ctx, resp, err)
+		if hErr == nil {
+			continue
 		}
+
+		if err != nil && errors.Is(hErr, err) {
+			continue // the handler handed back what it was given.
+		}
+
+		return hErr
 	}
 
 	return nil
@@ -150,112 +167,30 @@ type handlerError struct{ error }
 
 func (e handlerError) Unwrap() error { return e.error }
 
-// RequestOption declares the type of option one can pass
-// to the Do methods(JSON, Form, ReadJSON...).
-// Request options run before request constructed.
-type RequestOption = func(*http.Request) error
-
-// We always add the following request headers, unless they're removed by custom ones.
-var defaultRequestOptions = []RequestOption{
-	RequestHeader(false, acceptKey, contentTypeJSON),
-}
-
-// RequestHeader adds or sets (if overridePrev is true) a header to the request.
-func RequestHeader(overridePrev bool, key string, values ...string) RequestOption {
-	key = http.CanonicalHeaderKey(key)
-
-	return func(req *http.Request) error {
-		if overridePrev { // upsert.
-			req.Header[key] = values
-		} else { // just insert.
-			req.Header[key] = append(req.Header[key], values...)
-		}
-
-		return nil
-	}
-}
-
-// RequestAuthorization sets an Authorization request header.
-// Note that we could do the same with a Transport RoundDrip too.
-func RequestAuthorization(value string) RequestOption {
-	return RequestHeader(true, "Authorization", value)
-}
-
-// RequestAuthorizationBearer sets an Authorization: Bearer $token request header.
-func RequestAuthorizationBearer(accessToken string) RequestOption {
-	headerValue := "Bearer " + accessToken
-	return RequestAuthorization(headerValue)
-}
-
-// RequestQuery adds a set of URL query parameters to the request.
-func RequestQuery(query url.Values) RequestOption {
-	return func(req *http.Request) error {
-		q := req.URL.Query()
-		for k, v := range query {
-			q[k] = v
-		}
-		req.URL.RawQuery = q.Encode()
-
-		return nil
-	}
-}
-
-// RequestParam sets a single URL query parameter to the request.
-func RequestParam(key string, values ...string) RequestOption {
-	return RequestQuery(url.Values{
-		key: values,
-	})
-}
-
-// ClientTrace adds a client trace to the request.
-func ClientTrace(clientTrace *httptrace.ClientTrace) RequestOption {
-	return func(req *http.Request) error {
-		newReq := req.WithContext(httptrace.WithClientTrace(req.Context(), clientTrace))
-		*req = *newReq
-		return nil
-	}
-}
-
-// RequestRateLimit sets the rate limit for specific request(s) per second.
-// Note that this is a blocking option, so it will wait
-// until the rate limit is reached before sending the request.
-// This is useful for specific endpoints that have a rate limit and you want to
-// avoid hitting it too hard.
-func RequestRateLimit(requestsPerSecond int) RequestOption {
-	limiter := rate.NewLimiter(rate.Limit(requestsPerSecond), requestsPerSecond)
-	return func(req *http.Request) error {
-		if err := limiter.Wait(req.Context()); err != nil {
-			return err
-		}
-		return nil
-	}
-}
-
-// RequestRateLimitPerMinute sets the rate limit for specific request(s) per minute.
-// See `RequestRateLimit` for more details.
-func RequestRateLimitPerMinute(requestsPerMinute int) RequestOption {
-	ratePerSecond := rate.Limit(float64(requestsPerMinute) / 60.0)
-	limiter := rate.NewLimiter(ratePerSecond, requestsPerMinute)
-	return func(req *http.Request) error {
-		if err := limiter.Wait(req.Context()); err != nil {
-			return err
-		}
-		return nil
-	}
+// withDefaultRequestOption returns a new slice holding "defaults" followed by
+// "opts", so an option the caller passed wins over the default. It never writes
+// into the caller's backing array.
+func withDefaultRequestOption(opts []RequestOption, defaults ...RequestOption) []RequestOption {
+	return slices.Concat(defaults, opts)
 }
 
 // Do sends an HTTP request and returns an HTTP response.
 //
 // The payload can be:
-// - io.Reader
-// - raw []byte
-// - JSON raw message
-// - string
-// - struct (JSON).
+//   - io.Reader
+//   - raw []byte
+//   - JSON raw message
+//   - string
+//   - url.Values
+//   - struct (JSON).
 //
 // If method is empty then it defaults to "GET".
 // The final variadic, optional input argument sets
 // the custom request options to use before the request.
+//
+// Closing the returned response body is up to the caller,
+// see Client.DrainResponseBody. The Client.BindXXX and Client.ReadXXX
+// methods do that for you.
 //
 // Any HTTP returned error will be of type APIError
 // or a timeout error if the given context was canceled.
@@ -269,29 +204,9 @@ func (c *Client) Do(ctx context.Context, method, urlpath string, payload any, op
 		method = http.MethodGet
 	}
 
-	// Find the payload, if any.
-	var body io.Reader
-	if payload != nil {
-		switch v := payload.(type) {
-		case io.Reader:
-			body = v
-		case []byte:
-			body = bytes.NewBuffer(v)
-		case json.RawMessage:
-			body = bytes.NewBuffer(v)
-		case string:
-			body = strings.NewReader(v)
-		case url.Values:
-			body = strings.NewReader(v.Encode())
-		default:
-			w := new(bytes.Buffer)
-			// We assume it's a struct, we wont make use of reflection to find out though.
-			err := json.NewEncoder(w).Encode(v)
-			if err != nil {
-				return nil, err
-			}
-			body = w
-		}
+	body, err := c.payloadReader(payload)
+	if err != nil {
+		return nil, err
 	}
 
 	if c.BaseURL != "" {
@@ -326,27 +241,72 @@ func (c *Client) Do(ctx context.Context, method, urlpath string, payload any, op
 		}
 	}
 
+	return c.send(ctx, req)
+}
+
+// payloadReader turns the accepted payload shapes into a request body reader.
+func (c *Client) payloadReader(payload any) (io.Reader, error) {
+	if payload == nil {
+		return nil, nil
+	}
+
+	switch v := payload.(type) {
+	case io.Reader:
+		return v, nil
+	case []byte:
+		return bytes.NewReader(v), nil
+	case jsonv1.RawMessage:
+		return bytes.NewReader(v), nil
+	case string:
+		return strings.NewReader(v), nil
+	case url.Values:
+		return strings.NewReader(v.Encode()), nil
+	default:
+		// We assume it's a struct, we won't make use of reflection to find out though.
+		w := new(bytes.Buffer)
+		if err := encodeJSON(w, v, c.jsonOptions); err != nil {
+			return nil, err
+		}
+		return w, nil
+	}
+}
+
+// send runs the request, repeating it according to the configured retry policy.
+func (c *Client) send(ctx context.Context, req *http.Request) (*http.Response, error) {
+	var (
+		resp    *http.Response
+		respErr error
+	)
+
 	for attempt := 1; ; attempt++ {
-		if attempt > 1 && !rewindBody(req) {
-			// The body was consumed and cannot be reproduced (raw io.Reader payload);
-			// the previous result is already returned below.
-			break
+		// Each attempt gets its own request value: net/http may mutate the one
+		// it was handed and documents that a request must not be reused.
+		// Clone from the request's own context, not the outer one: request
+		// options such as ClientTrace and RequestRateLimit store their state
+		// there and would otherwise be dropped on every attempt.
+		attemptReq := req.Clone(req.Context())
+		if attempt > 1 && !rewindBody(attemptReq) {
+			// The body was consumed and cannot be reproduced;
+			// hand back whatever the previous attempt produced.
+			return resp, respErr
 		}
 
-		resp, respErr := c.attempt(ctx, req)
+		resp, respErr = c.attempt(ctx, attemptReq)
+
 		var hErr handlerError
 		if errors.As(respErr, &hErr) {
 			// A request handler aborted the call; this is not a transport failure.
+			// Any response was already released by attempt.
 			return nil, hErr.error
 		}
 
-		if c.retry == nil || attempt >= c.retry.MaxAttempts || !c.retry.shouldRetry(req, resp, respErr) {
+		if c.retry == nil || attempt >= c.retry.MaxAttempts || !c.retry.shouldRetry(attemptReq, resp, respErr) {
 			return resp, respErr
 		}
 
 		wait := c.retry.wait(attempt, resp)
 		if c.retry.OnRetry != nil {
-			c.retry.OnRetry(attempt, req, resp, respErr, wait)
+			c.retry.OnRetry(attempt, attemptReq, resp, respErr, wait)
 		}
 
 		if resp != nil {
@@ -362,19 +322,15 @@ func (c *Client) Do(ctx context.Context, method, urlpath string, payload any, op
 			return nil, err
 		}
 	}
-
-	return nil, errors.New("client.Do: unreachable")
 }
 
-// attempt performs a single round trip: it waits on the rate limiter, fires the
+// attempt performs a single round trip: it waits on the rate limiters, fires the
 // BeginRequest handlers, sends the request and fires the EndRequest handlers.
 // An error produced by a request handler is returned as a handlerError, which
 // aborts the whole call regardless of any retry policy.
 func (c *Client) attempt(ctx context.Context, req *http.Request) (*http.Response, error) {
-	if c.rateLimiter != nil {
-		if err := c.rateLimiter.Wait(ctx); err != nil {
-			return nil, err
-		}
+	if err := c.waitForRateLimits(ctx, req); err != nil {
+		return nil, err
 	}
 
 	if err := c.emitBeginRequest(ctx, req); err != nil {
@@ -386,24 +342,34 @@ func (c *Client) attempt(ctx context.Context, req *http.Request) (*http.Response
 	resp, respErr := c.HTTPClient.Do(req)
 
 	if err := c.emitEndRequest(ctx, resp, respErr); err != nil {
+		// The response is ours to release: the caller never sees it.
+		if resp != nil {
+			_ = DrainResponseBody(resp)
+		}
+
 		return nil, handlerError{err}
 	}
 
 	return resp, respErr
 }
 
-// DrainResponseBody drains response body and close it, allowing the transport to reuse TCP connections.
-func DrainResponseBody(resp *http.Response) (err error) {
-	_, err = io.Copy(io.Discard, resp.Body)
-	if resp.Body != nil {
-		closeErr := resp.Body.Close()
-		err = errors.Join(err, closeErr) // errors.Join checks for each err != nil, so no further checks needed.
+// DrainResponseBody drains the response body and closes it, allowing the
+// transport to reuse TCP connections. A nil response or a nil body is a no-op.
+func DrainResponseBody(resp *http.Response) error {
+	if resp == nil || resp.Body == nil {
+		return nil
 	}
-	return
+
+	_, err := io.Copy(io.Discard, resp.Body)
+	closeErr := resp.Body.Close()
+
+	// errors.Join checks for each err != nil, so no further checks needed.
+	return errors.Join(err, closeErr)
 }
 
-// DrainResponseBody drains response body and close it, allowing the transport to reuse TCP connections.
-// It's automatically called on Client.ReadXXX methods on the end.
+// DrainResponseBody drains the response body and closes it, allowing the
+// transport to reuse TCP connections.
+// It's automatically called by the Client.BindXXX and Client.ReadXXX methods.
 func (c *Client) DrainResponseBody(resp *http.Response) error {
 	return DrainResponseBody(resp)
 }
@@ -412,277 +378,29 @@ const (
 	acceptKey                 = "Accept"
 	contentTypeKey            = "Content-Type"
 	contentLengthKey          = "Content-Length"
-	contentTypePlainText      = "plain/text"
+	contentTypePlainText      = "text/plain"
 	contentTypeJSON           = "application/json"
 	contentTypeFormURLEncoded = "application/x-www-form-urlencoded"
 )
 
 // JSON writes data as JSON to the server.
+//
+// Closing the returned response body is up to the caller,
+// see Client.DrainResponseBody.
 func (c *Client) JSON(ctx context.Context, method, urlpath string, payload any, opts ...RequestOption) (*http.Response, error) {
-	opts = append(opts, RequestHeader(true, contentTypeKey, contentTypeJSON))
-	return c.Do(ctx, method, urlpath, payload, opts...)
+	return c.Do(ctx, method, urlpath, payload,
+		withDefaultRequestOption(opts, RequestHeader(true, contentTypeKey, contentTypeJSON))...)
 }
 
-// JSON writes form data to the server.
+// Form writes form data to the server.
+//
+// Closing the returned response body is up to the caller,
+// see Client.DrainResponseBody.
 func (c *Client) Form(ctx context.Context, method, urlpath string, formValues url.Values, opts ...RequestOption) (*http.Response, error) {
 	payload := formValues.Encode()
 
-	opts = append(opts,
-		RequestHeader(true, contentTypeKey, contentTypeFormURLEncoded),
-		RequestHeader(true, contentLengthKey, strconv.Itoa(len(payload))),
-	)
-
-	return c.Do(ctx, method, urlpath, payload, opts...)
-}
-
-// Uploader holds the necessary information for upload requests.
-//
-// Look the Client.NewUploader method.
-type Uploader struct {
-	client *Client
-
-	body   *bytes.Buffer
-	Writer *multipart.Writer
-}
-
-// AddFileSource adds a form field to the uploader with the given key.
-func (u *Uploader) AddField(key, value string) error {
-	f, err := u.Writer.CreateFormField(key)
-	if err != nil {
-		return err
-	}
-
-	_, err = io.Copy(f, strings.NewReader(value))
-	return err
-}
-
-// AddFileSource adds a form file to the uploader with the given key.
-func (u *Uploader) AddFileSource(key, filename string, source io.Reader) error {
-	f, err := u.Writer.CreateFormFile(key, filename)
-	if err != nil {
-		return err
-	}
-
-	_, err = io.Copy(f, source)
-	return err
-}
-
-// AddFile adds a local form file to the uploader with the given key.
-func (u *Uploader) AddFile(key, filename string) error {
-	source, err := os.Open(filename)
-	if err != nil {
-		return err
-	}
-	defer source.Close()
-
-	return u.AddFileSource(key, filename, source)
-}
-
-// Uploads sends local data to the server.
-func (u *Uploader) Upload(ctx context.Context, method, urlpath string, opts ...RequestOption) (*http.Response, error) {
-	err := u.Writer.Close()
-	if err != nil {
-		return nil, err
-	}
-
-	payload := bytes.NewReader(u.body.Bytes())
-	opts = append(opts, RequestHeader(true, contentTypeKey, u.Writer.FormDataContentType()))
-
-	return u.client.Do(ctx, method, urlpath, payload, opts...)
-}
-
-// NewUploader returns a structure which is responsible for sending
-// file and form data to the server.
-func (c *Client) NewUploader() *Uploader {
-	body := new(bytes.Buffer)
-	writer := multipart.NewWriter(body)
-
-	return &Uploader{
-		client: c,
-		body:   body,
-		Writer: writer,
-	}
-}
-
-// IsErrEmptyJSON reports whether the given "err" is caused by a
-// Client.ReadJSON call when the request body was empty or
-// didn't start with { or [.
-var IsErrEmptyJSON = func(err error) bool {
-	if err == nil {
-		return false
-	}
-
-	if errors.Is(err, io.EOF) {
-		return true
-	}
-
-	if v, ok := err.(*json.SyntaxError); ok {
-		// standard go json encoder error.
-		return v.Offset == 0 && v.Error() == "unexpected end of JSON input"
-	}
-
-	errMsg := err.Error()
-	// 3rd party pacakges:
-	return strings.Contains(errMsg, "readObjectStart: expect {") || strings.Contains(errMsg, "readArrayStart: expect [")
-}
-
-// ReadJSON binds "dest" to the response's body.
-// After this call, the response body reader is closed.
-//
-// If the response status code is >= 400 then it returns an APIError.
-// If the response body is expected empty sometimes, you can omit the error through IsErrEmptyJSON.
-func (c *Client) ReadJSON(ctx context.Context, dest any, method, urlpath string, payload any, opts ...RequestOption) error {
-	if payload != nil {
-		opts = append(opts, RequestHeader(true, contentTypeKey, contentTypeJSON))
-	}
-
-	resp, err := c.Do(ctx, method, urlpath, payload, opts...)
-	if err != nil {
-		return err
-	}
-	defer c.DrainResponseBody(resp)
-
-	if resp.StatusCode >= http.StatusBadRequest {
-		return c.extractError(resp)
-	}
-
-	// DBUG
-	// b, _ := io.ReadAll(resp.Body)
-	// println(string(b))
-	// return json.Unmarshal(b, &dest)
-
-	if dest != nil {
-		return json.NewDecoder(resp.Body).Decode(&dest)
-	}
-
-	return nil
-}
-
-// ReadPlain like ReadJSON but it accepts a pointer to a string or byte slice or integer
-// and it reads the body as plain text.
-func (c *Client) ReadPlain(ctx context.Context, dest any, method, urlpath string, payload any, opts ...RequestOption) error {
-	resp, err := c.Do(ctx, method, urlpath, payload, opts...)
-	if err != nil {
-		return err
-	}
-	defer c.DrainResponseBody(resp)
-
-	if resp.StatusCode >= http.StatusBadRequest {
-		return c.extractError(resp)
-	}
-
-	body, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return err
-	}
-
-	switch ptr := dest.(type) {
-	case *[]byte:
-		*ptr = body
-		return nil
-	case *string:
-		*ptr = string(body)
-		return nil
-	case *int:
-		*ptr, err = strconv.Atoi(string(body))
-		return err
-	default:
-		return fmt.Errorf("unsupported response body type: %T", ptr)
-	}
-}
-
-// GetPlainUnquote reads the response body as raw text and tries to unquote it,
-// useful when the remote server sends a single key as a value but due to backend mistake
-// it sends it as JSON (quoted) instead of plain text.
-func (c *Client) GetPlainUnquote(ctx context.Context, method, urlpath string, payload any, opts ...RequestOption) (string, error) {
-	var bodyStr string
-	if err := c.ReadPlain(ctx, &bodyStr, method, urlpath, payload, opts...); err != nil {
-		return "", err
-	}
-
-	s, err := strconv.Unquote(bodyStr)
-	if err == nil {
-		bodyStr = s
-	}
-
-	return bodyStr, nil
-}
-
-// WriteTo reads the response and then copies its data to the "dest" writer.
-// If the "dest" is a type of HTTP response writer then it writes the
-// content-type and content-length of the original request.
-//
-// Returns the amount of bytes written to "dest".
-func (c *Client) WriteTo(ctx context.Context, dest io.Writer, method, urlpath string, payload any, opts ...RequestOption) (int64, error) {
-	if payload != nil {
-		opts = append(opts, RequestHeader(true, contentTypeKey, contentTypeJSON))
-	}
-
-	resp, err := c.Do(ctx, method, urlpath, payload, opts...)
-	if err != nil {
-		return 0, err
-	}
-	defer resp.Body.Close()
-
-	if w, ok := dest.(http.ResponseWriter); ok {
-		// Copy the content type and content-length.
-		w.Header().Set("Content-Type", resp.Header.Get("Content-Type"))
-		if resp.ContentLength > 0 {
-			w.Header().Set("Content-Length", strconv.FormatInt(resp.ContentLength, 10))
-		}
-	}
-
-	return io.Copy(dest, resp.Body)
-}
-
-// BindResponse consumes the response's body and binds the result to the "dest" pointer,
-// closing the response's body is up to the caller.
-//
-// The "dest" will be binded based on the response's content type header.
-// Note that this is strict in order to catch bad actioners fast,
-// e.g. it wont try to read plain text if not specified on
-// the response headers and the dest is a *string.
-func BindResponse(resp *http.Response, dest any) (err error) {
-	contentType := trimHeader(resp.Header.Get(contentTypeKey))
-	switch contentType {
-	case contentTypeJSON: // the most common scenario on successful responses.
-		return json.NewDecoder(resp.Body).Decode(&dest)
-	case contentTypePlainText:
-		b, err := io.ReadAll(resp.Body)
-		if err != nil {
-			return err
-		}
-
-		switch v := dest.(type) {
-		case *string:
-			*v = string(b)
-		case *[]byte:
-			*v = b
-		default:
-			return fmt.Errorf("plain text response should accept a *string or a *[]byte")
-		}
-
-	default:
-		acceptContentType := trimHeader(resp.Request.Header.Get(acceptKey))
-		msg := ""
-		if acceptContentType == contentType {
-			// Here we make a special case, if the content type
-			// was explicitly set by the request but we cannot handle it.
-			msg = fmt.Sprintf("current implementation can not handle the received (and accepted) mime type: %s", contentType)
-		} else {
-			msg = fmt.Sprintf("unexpected mime type received: %s", contentType)
-		}
-		err = errors.New(msg)
-	}
-
-	return
-}
-
-func trimHeader(v string) string {
-	for i, char := range v {
-		if char == ' ' || char == ';' {
-			return v[:i]
-		}
-	}
-	return v
+	// Note: net/http derives Content-Length from the body reader.
+	// An outgoing Content-Length header would be ignored.
+	return c.Do(ctx, method, urlpath, payload,
+		withDefaultRequestOption(opts, RequestHeader(true, contentTypeKey, contentTypeFormURLEncoded))...)
 }

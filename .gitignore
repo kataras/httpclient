@@ -10,3 +10,11 @@ internalcode-*/
 _examples/**/uploads/*
 _issues/**
 .DS_STORE
+# AI
+.claude
+CLAUDE.md
+.plexon
+PLEXON.md
+.codex
+.agents
+AGENTS.md

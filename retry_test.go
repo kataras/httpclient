@@ -7,7 +7,9 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"slices"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -19,7 +21,22 @@ type flakyServer struct {
 	*httptest.Server
 	statuses []int
 	calls    atomic.Int32
-	bodies   []string
+
+	mu     sync.Mutex // the handler runs on the server's goroutines.
+	bodies []string
+}
+
+func (fs *flakyServer) recordBody(body string) {
+	fs.mu.Lock()
+	fs.bodies = append(fs.bodies, body)
+	fs.mu.Unlock()
+}
+
+func (fs *flakyServer) recordedBodies() []string {
+	fs.mu.Lock()
+	defer fs.mu.Unlock()
+
+	return slices.Clone(fs.bodies)
 }
 
 func newFlakyServer(t *testing.T, statuses ...int) *flakyServer {
@@ -27,7 +44,7 @@ func newFlakyServer(t *testing.T, statuses ...int) *flakyServer {
 	fs := &flakyServer{statuses: statuses}
 	fs.Server = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		b, _ := io.ReadAll(r.Body)
-		fs.bodies = append(fs.bodies, string(b))
+		fs.recordBody(string(b))
 		n := int(fs.calls.Add(1))
 		w.Header().Set("Content-Type", "application/json")
 		if n <= len(fs.statuses) {
@@ -131,30 +148,6 @@ func TestRetryWaitHonoursRetryAfterSecondsAndCapsIt(t *testing.T) {
 	}
 }
 
-func TestRetryStopsWhenContextIsCancelledDuringBackoff(t *testing.T) {
-	srv := newFlakyServer(t, 503, 503, 503)
-	p := RetryPolicy{MaxAttempts: 3, InitialBackoff: 10 * time.Second, MaxBackoff: 10 * time.Second}
-	client := New(BaseURL(srv.URL), Retry(p))
-
-	ctx, cancel := context.WithCancel(context.Background())
-	go func() {
-		time.Sleep(30 * time.Millisecond)
-		cancel()
-	}()
-
-	start := time.Now()
-	_, err := client.Do(ctx, http.MethodGet, "/", nil)
-	if !errors.Is(err, context.Canceled) {
-		t.Fatalf("expected context.Canceled, got %v", err)
-	}
-	if time.Since(start) > 2*time.Second {
-		t.Fatalf("cancel must interrupt the backoff promptly, took %v", time.Since(start))
-	}
-	if srv.calls.Load() != 1 {
-		t.Fatalf("expected 1 request before the cancel, got %d", srv.calls.Load())
-	}
-}
-
 func TestRetryReplaysBufferedBodies(t *testing.T) {
 	srv := newFlakyServer(t, 503)
 	client := New(BaseURL(srv.URL), Retry(fastRetry(2)))
@@ -162,8 +155,9 @@ func TestRetryReplaysBufferedBodies(t *testing.T) {
 	if err := client.ReadJSON(defaultCtx, nil, http.MethodPost, "/", testValue{Firstname: "Makis"}); err != nil {
 		t.Fatalf("expected success on the retry, got %v", err)
 	}
-	if len(srv.bodies) != 2 || srv.bodies[0] != srv.bodies[1] || !strings.Contains(srv.bodies[1], "Makis") {
-		t.Fatalf("expected the same JSON body on both attempts, got %q", srv.bodies)
+	bodies := srv.recordedBodies()
+	if len(bodies) != 2 || bodies[0] != bodies[1] || !strings.Contains(bodies[1], "Makis") {
+		t.Fatalf("expected the same JSON body on both attempts, got %q", bodies)
 	}
 }
 

@@ -45,3 +45,14 @@ func (c *Client) GetCurrentByCity(ctx context.Context, city string) (resp Respon
 	err = c.Client.ReadJSON(ctx, &resp, http.MethodGet, urlpath, nil, params)
 	return
 }
+
+// GetCurrent is GetCurrentByCity written with the generic method: the response
+// type is named at the call site and there is no destination pointer.
+func (c *Client) GetCurrent(ctx context.Context, city string) (Response, error) {
+	params := httpclient.RequestQuery(url.Values{
+		"q":   []string{city},
+		"aqi": []string{"no"},
+	})
+
+	return c.Client.BindJSON[Response](ctx, http.MethodGet, "/current.json", nil, params)
+}

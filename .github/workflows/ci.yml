@@ -17,7 +17,7 @@ jobs:
 
     strategy:
       matrix:
-        go_version: [1.26.x]
+        go_version: [1.27.x]
     steps:
 
     - name: Set up Go 1.x
@@ -29,12 +29,10 @@ jobs:
       uses: actions/checkout@v6
 
     - name: Test
-      run: go test -v ./...
+      run: go test -v -race ./...
 
-    - name: Setup examples for testing
-      run: ./.github/scripts/setup_examples_test.bash
+    - name: Vet
+      run: go vet ./...
 
-    - name: Test examples
-      continue-on-error: true
-      working-directory: _examples
-      run: go test -v -cover -race ./...
+    - name: Build examples
+      run: bash ./.github/scripts/setup_examples_test.bash

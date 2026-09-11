@@ -3,8 +3,10 @@ package httpclient
 import (
 	"bytes"
 	"errors"
+	"fmt"
 	"net/http"
 	"strings"
+	"sync"
 	"testing"
 )
 
@@ -26,34 +28,31 @@ func TestHandlerOptionServesRequestsThroughTheGivenHandler(t *testing.T) {
 	}
 }
 
-// TestRateLimitPerMinuteDividesByTheMinute guards the per-minute limiter against
-// being configured 3600 times faster than requested.
-func TestRateLimitPerMinuteDividesByTheMinute(t *testing.T) {
-	client := New(RateLimitPerMinute(60))
-
-	if client.rateLimiter == nil {
-		t.Fatal("expected a rate limiter to be configured")
-	}
-
-	if got := float64(client.rateLimiter.Limit()); got != 1 {
-		t.Fatalf("60 requests per minute must be 1 request per second, got %v", got)
-	}
-}
-
 type errTransport struct{ err error }
 
 func (t errTransport) RoundTrip(*http.Request) (*http.Response, error) { return nil, t.err }
 
-type bufferLogger struct{ buf bytes.Buffer }
+type bufferLogger struct {
+	mu  sync.Mutex
+	buf bytes.Buffer
+}
 
+// Debugf formats for real. The previous double concatenated the format string
+// with its string arguments, which is why nobody noticed that the request and
+// response dumps were being passed as the format string.
 func (l *bufferLogger) Debugf(format string, args ...any) {
-	l.buf.WriteString(format)
-	for _, a := range args {
-		if s, ok := a.(string); ok {
-			l.buf.WriteString(s)
-		}
-	}
+	l.mu.Lock()
+	defer l.mu.Unlock()
+
+	fmt.Fprintf(&l.buf, format, args...)
 	l.buf.WriteByte('\n')
+}
+
+func (l *bufferLogger) String() string {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+
+	return l.buf.String()
 }
 
 // TestDebugLoggerSurvivesTransportErrors: on a transport error there is no response,
@@ -69,7 +68,7 @@ func TestDebugLoggerSurvivesTransportErrors(t *testing.T) {
 		t.Fatalf("expected the transport error to be returned, got %v", err)
 	}
 
-	if !strings.Contains(logger.buf.String(), "dial failed") {
-		t.Fatalf("expected the transport error to be logged, got %q", logger.buf.String())
+	if !strings.Contains(logger.String(), "dial failed") {
+		t.Fatalf("expected the transport error to be logged, got %q", logger.String())
 	}
 }

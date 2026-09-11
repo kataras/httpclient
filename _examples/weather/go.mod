@@ -1,8 +1,6 @@
 module weather
 
-go 1.24
-
-toolchain go1.24.5
+go 1.27
 
 replace github.com/kataras/httpclient => ../../
 
@@ -14,5 +12,5 @@ require (
 require (
 	github.com/kataras/pio v0.0.10 // indirect
 	golang.org/x/sys v0.0.0-20221006211917-84dc82d7e875 // indirect
-	golang.org/x/time v0.12.0 // indirect
+	golang.org/x/time v0.14.0 // indirect
 )

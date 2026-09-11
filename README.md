@@ -2,7 +2,7 @@
 
 [![build status](https://img.shields.io/github/actions/workflow/status/kataras/httpclient/ci.yml?style=for-the-badge)](https://github.com/kataras/httpclient/actions) [![report card](https://img.shields.io/badge/report%20card-a%2B-ff3333.svg?style=for-the-badge)](https://goreportcard.com/report/github.com/kataras/httpclient) [![godocs](https://img.shields.io/badge/go-%20docs-488AC7.svg?style=for-the-badge)](https://pkg.go.dev/github.com/kataras/httpclient/)
 
-HTTP Client is a simple HTTP/2 client for Go.
+HTTP Client is a small HTTP client for Go, for talking to JSON APIs. Requires Go 1.27.
 
 ```go
 package main
@@ -55,15 +55,39 @@ func (c *Client) GetCurrentByCity(ctx context.Context, city string) (resp Respon
 
 Some of the features HTTP Client offers:
 
-* Rate Limit
+* Typed responses through generic methods
+* Rate limits, per client or per endpoint
 * Retry with backoff
-* Secret redaction in errors and debug output
+* Query parameter and header redaction in errors and debug output
 * Middleware
 * JSON (read & write)
 * Forms
-* File Upload
-* Plain Text
+* File upload
+* Plain text
 * Debug and more...
+
+### Typed responses
+
+`BindJSON` names the response type at the call site and returns it. There is no destination pointer, so there is no way to pass the wrong kind of value.
+
+```go
+weather, err := c.BindJSON[Response](ctx, http.MethodGet, "/current.json", nil, params)
+```
+
+`ReadJSON` fills a value you already hold, which is what you want for a long-lived field or a pooled struct. Both close the response body for you.
+
+```go
+var weather Response
+err := c.ReadJSON(ctx, &weather, http.MethodGet, "/current.json", nil, params)
+```
+
+`BindPlain[T]` does the same for plain text bodies, into a string, byte slice or number. `Bind[T](resp)` decodes a response you already hold, choosing by `Content-Type`. `BindError[T](err)` decodes the body an `APIError` carries.
+
+An empty response body comes back as `io.EOF`, which `IsErrEmptyJSON` also recognises. Several APIs answer a successful write with no content, so that is a normal outcome rather than a failure.
+
+### Who closes the body
+
+`Do`, `JSON`, `Form` and `Uploader.Upload` hand you the `*http.Response` with its body still open. Closing it is your job, and `DrainResponseBody` is how to do it so the connection can be reused. The `Bind` and `Read` methods and `WriteTo` do it for you.
 
 ### Retries
 
@@ -84,6 +108,23 @@ c := httpclient.New(
 
 Every attempt waits on the rate limiter and is visible to the registered request handlers, so `Debug` output shows the failed attempts as well.
 
+### Rate limits per endpoint
+
+`RateLimit` covers the whole API. When one endpoint has a tighter budget of its own, register a named limiter and tag the calls that use it. Every call sharing the key shares the budget, retries included.
+
+```go
+c := httpclient.New(
+	httpclient.BaseURL(BaseURL),
+	httpclient.RateLimit(20),             // the whole API
+	httpclient.RateLimitFor("search", 2), // this endpoint
+)
+
+results, err := c.BindJSON[Results](ctx, http.MethodGet, "/search", nil,
+	httpclient.RequestRateLimit("search"))
+```
+
+A `Clone` builds its own limiters rather than sharing the parent's.
+
 ### Redacting secrets
 
 When the API key travels in the query string it would otherwise be printed by `APIError.Error()` and by the `Debug` dumps. Register the parameter names once and their values are replaced with `REDACTED` in all rendered text. The request itself is not modified.
@@ -97,13 +138,17 @@ c := httpclient.New(
 )
 ```
 
+`RedactHeaders` adds header names to the list. `Authorization`, `Proxy-Authorization`, `Cookie` and `Set-Cookie` are always scrubbed, and a password in a URL is masked.
+
+Request and response bodies are not scrubbed. There is no general way to find a secret inside one, so do not send a secret in a body and expect `Debug` to hide it.
+
 `httpclient.RedactURL(u, "apiKey")` is available for your own log lines.
 
 ## 📖 Learning HTTP Client
 
 ### Installation
 
-The only requirement is the [Go Programming Language](https://go.dev/dl/).
+The only requirement is the [Go Programming Language](https://go.dev/dl/), version 1.27 or newer. The package uses generic methods and `encoding/json/v2`.
 
 #### Create a new project
 
