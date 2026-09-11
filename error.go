@@ -8,6 +8,7 @@ import (
 	"strings"
 
 	jsonv1 "encoding/json"
+	json "encoding/json/v2"
 )
 
 // APIError errors that may return from the Client.
@@ -25,30 +26,38 @@ type APIError struct {
 }
 
 // Error implements the standard error type.
+//
+// It reads "URL: 404 Not Found: body", skipping each part that is missing.
+// Server code builds APIError values too, without a live round trip behind
+// them, so Response, its Request and the Body may each be nil: an error with
+// a body and no response renders the body alone, the zero value renders "".
 func (e APIError) Error() string {
-	if e.Response == nil {
-		return ""
-	}
-
 	var b strings.Builder
 
-	if e.URL != "" {
-		b.WriteString(e.URL)
-	} else if e.Response.Request != nil && e.Response.Request.URL != nil {
-		b.WriteString(e.Response.Request.URL.String())
-	}
-	b.WriteString(": ")
+	if e.Response != nil {
+		if e.URL != "" {
+			b.WriteString(e.URL)
+		} else if e.Response.Request != nil && e.Response.Request.URL != nil {
+			b.WriteString(e.Response.Request.URL.String())
+		}
 
-	// Response.Status already reads "404 Not Found". Only fall back to the
-	// generated text when a hand-built response left it empty.
-	if e.Response.Status != "" {
-		b.WriteString(e.Response.Status)
-	} else {
-		b.WriteString(http.StatusText(e.Response.StatusCode))
+		if b.Len() > 0 {
+			b.WriteString(": ")
+		}
+
+		// Response.Status already reads "404 Not Found". Only fall back to the
+		// generated text when a hand-built response left it empty.
+		if e.Response.Status != "" {
+			b.WriteString(e.Response.Status)
+		} else {
+			b.WriteString(http.StatusText(e.Response.StatusCode))
+		}
 	}
 
 	if len(e.Body) > 0 {
-		b.WriteString(": ")
+		if b.Len() > 0 {
+			b.WriteString(": ")
+		}
 		b.Write(e.Body)
 	}
 
@@ -113,14 +122,17 @@ func GetError(err error) (APIError, bool) {
 
 // DecodeError binds a json error to the "destPtr".
 //
+// The optional "opts" are the encoding/json/v2 options for the body. They
+// replace the package default of encoding/json.DefaultOptionsV1().
+//
 // Prefer the generic BindError, which returns the decoded value.
-func DecodeError(err error, destPtr any) error {
+func DecodeError(err error, destPtr any, opts ...json.Options) error {
 	apiErr, ok := GetError(err)
 	if !ok {
 		return err
 	}
 
-	return decodeJSON(bytes.NewReader(apiErr.Body), destPtr, defaultJSONOptions())
+	return decodeJSON(bytes.NewReader(apiErr.Body), destPtr, joinOrDefault(opts))
 }
 
 // GetErrorCode reads an error, which should be a type of APIError,

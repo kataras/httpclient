@@ -9,6 +9,8 @@ import (
 	"reflect"
 	"strconv"
 	"strings"
+
+	json "encoding/json/v2"
 )
 
 // PlainText lists the Go types Client.BindPlain can produce from a
@@ -44,7 +46,7 @@ func (c *Client) BindJSON[T any](ctx context.Context, method, urlpath string, pa
 		return value, c.extractError(resp)
 	}
 
-	if err = decodeJSON(resp.Body, &value, c.jsonOptions); err != nil {
+	if err = decodeJSON(resp.Body, &value, c.jsonUnmarshalOptions); err != nil {
 		var zero T
 		return zero, err
 	}
@@ -155,11 +157,15 @@ func text(body []byte) string {
 // from the response's Content-Type header. Closing the response body is up to
 // the caller.
 //
+// The optional "opts" are the encoding/json/v2 options for a JSON body. They
+// replace the package default of encoding/json.DefaultOptionsV1(), they are
+// not merged with it.
+//
 // It is the generic form of BindResponse.
-func Bind[T any](resp *http.Response) (T, error) {
+func Bind[T any](resp *http.Response, opts ...json.Options) (T, error) {
 	var value T
 
-	if err := bindResponse(resp, &value, defaultJSONOptions()); err != nil {
+	if err := bindResponse(resp, &value, joinOrDefault(opts)); err != nil {
 		var zero T
 		return zero, err
 	}
@@ -173,7 +179,10 @@ func Bind[T any](resp *http.Response) (T, error) {
 //
 // It returns the original "err" untouched when "err" does not carry an APIError,
 // so a caller can tell "not an API error" apart from "an API error I could not decode".
-func BindError[T any](err error) (T, error) {
+//
+// The optional "opts" are the encoding/json/v2 options for the body. They
+// replace the package default of encoding/json.DefaultOptionsV1().
+func BindError[T any](err error, opts ...json.Options) (T, error) {
 	var value T
 
 	apiErr, ok := GetError(err)
@@ -181,7 +190,7 @@ func BindError[T any](err error) (T, error) {
 		return value, err
 	}
 
-	if decodeErr := decodeJSON(bytes.NewReader(apiErr.Body), &value, defaultJSONOptions()); decodeErr != nil {
+	if decodeErr := decodeJSON(bytes.NewReader(apiErr.Body), &value, joinOrDefault(opts)); decodeErr != nil {
 		var zero T
 		return zero, decodeErr
 	}

@@ -12,6 +12,7 @@ import (
 	"strings"
 
 	jsonv1 "encoding/json"
+	json "encoding/json/v2"
 )
 
 // A Client is an HTTP client. Initialize with the New package-level function.
@@ -46,8 +47,10 @@ type Client struct {
 	// Optional retry policy, see the Retry option. Nil disables retrying.
 	retry *RetryPolicy
 
-	// encoding/json/v2 options, see the JSONOptions option.
-	jsonOptions jsonOptions
+	// encoding/json/v2 options for request payloads and response bodies.
+	// See the JSONOptions, JSONMarshalOptions and JSONUnmarshalOptions options.
+	jsonMarshalOptions   json.Options
+	jsonUnmarshalOptions json.Options
 }
 
 // New returns a new HTTP Client.
@@ -61,13 +64,15 @@ type Client struct {
 //   - RateLimit, RateLimitPerMinute, RateLimiter
 //   - RateLimitFor, RateLimitForPerMinute, RateLimiterFor
 //   - Retry
+//   - OAuth2
 //   - RedactQueryParams, RedactHeaders
-//   - JSONOptions
+//   - JSONOptions, JSONMarshalOptions, JSONUnmarshalOptions
 //   - Debug
 //
 // Look the Client.Do/JSON/... methods to send requests,
-// the Client.BindXXX methods to receive typed responses and
-// the Client.ReadXXX methods to fill a value you already hold.
+// the Client.BindXXX methods to receive typed responses,
+// the Client.ReadXXX methods to fill a value you already hold and
+// Client.Call for endpoints whose body carries nothing.
 //
 // The default content type to send and receive data is JSON.
 func New(opts ...Option) *Client {
@@ -75,7 +80,8 @@ func New(opts ...Option) *Client {
 		HTTPClient:               &http.Client{},
 		PersistentRequestOptions: slices.Clone(defaultRequestOptions),
 		requestHandlers:          cloneDefaultRequestHandlers(),
-		jsonOptions:              defaultJSONOptions(),
+		jsonMarshalOptions:       defaultJSONOptions(),
+		jsonUnmarshalOptions:     defaultJSONOptions(),
 	}
 
 	// Record each option as it is applied, so that NoOption clears only what
@@ -267,7 +273,7 @@ func (c *Client) payloadReader(payload any) (io.Reader, error) {
 	default:
 		// We assume it's a struct, we won't make use of reflection to find out though.
 		w := new(bytes.Buffer)
-		if err := encodeJSON(w, v, c.jsonOptions); err != nil {
+		if err := encodeJSON(w, v, c.jsonMarshalOptions); err != nil {
 			return nil, err
 		}
 		return w, nil

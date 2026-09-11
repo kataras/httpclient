@@ -1,5 +1,30 @@
 # Changelog
 
+## v0.2.0
+
+This release makes the package the engine behind `github.com/kataras/iris/v14/client`: the Iris client is now type aliases and thin wrappers over this one, with the framework's JSON policy and logger as its defaults. Everything the Iris client had and this package lacked is added here. Nothing in v0.1.1 changes signature; two error messages change text.
+
+### New dependency
+
+`golang.org/x/oauth2` v0.36.0, for the `OAuth2` option below. Its only transitive requirement, `cloud.google.com/go/compute/metadata`, lands in `go.sum` and is not compiled into a binary that does not use it.
+
+### Additions
+
+- `OAuth2(src oauth2.TokenSource)` wraps the client's transport in an `oauth2.Transport`, so every request carries a token from `src`, cached and refreshed through `oauth2.ReuseTokenSource`. Give `Transport`, `Handler` or `DialTimeout` before it: it wraps whatever transport is set at that point. The header is added inside the transport, after `Debug` has dumped the request, so dumps never show the token.
+- `Client.Call(ctx, method, path, payload, opts...)` for endpoints whose success body carries nothing. A status of 400 or above returns the `APIError`, anything else returns nil with the body drained. It is `ReadJSON` with a nil destination, named.
+- `JSONMarshalOptions(opts...)` and `JSONUnmarshalOptions(opts...)` set the `json/v2` options for one direction. `JSONOptions` keeps setting both. The client now holds two option sets, because a policy can differ by direction: Iris allows invalid UTF-8 on the way out (a stray byte in a database string leaves as U+FFFD instead of failing the request) and keeps decoding strict.
+- `Bind[T]`, `BindError[T]`, `BindResponse` and `DecodeError` take optional trailing `json.Options`. Given options replace the package default of `encoding/json.DefaultOptionsV1()`, the same rule as `JSONOptions`. Existing calls compile unchanged.
+- `Debug(nil)` prints through the standard `log` package via the new `DefaultDebugLogger` variable. A nil logger used to panic on the first request.
+
+### Fixed
+
+- `APIError.Error()` with a response but no request rendered a leading `": "`, as in `": 502 Bad Gateway: body"`. Gone.
+- `APIError.Error()` with a body and no response rendered `""`. It renders the body now. Server code builds such errors by hand, with nothing behind them but a body, and forwarded them as empty messages. The zero value still renders `""`.
+
+### Docs
+
+- The `Handler` option and the transport behind it now say what they cannot do: the response is recorded in full before the client sees a byte, so Server-Sent Events, chunked output and mid-response cancellation cannot be exercised through them. `Transport` with an `httptest.NewTestServer` covers those cases.
+
 ## v0.1.1
 
 Additions only. Nothing in v0.1.0 changes behaviour or signature.

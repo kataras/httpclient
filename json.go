@@ -11,11 +11,8 @@ import (
 	json "encoding/json/v2"
 )
 
-// jsonOptions is the encoding/json/v2 option set carried by a Client.
-type jsonOptions = json.Options
-
-// JSONOptions sets the encoding/json/v2 options this Client uses to encode
-// request payloads and decode response bodies.
+// JSONOptions sets the encoding/json/v2 options this Client uses both to encode
+// request payloads and to decode response bodies.
 //
 // The default is encoding/json.DefaultOptionsV1(), which reproduces the
 // behaviour of the original encoding/json package: case-insensitive field
@@ -25,21 +22,52 @@ type jsonOptions = json.Options
 //	httpclient.JSONOptions(json.RejectUnknownMembers(true))
 //
 // Options given here replace the default set, they are not merged with it.
-// Join them yourself with json.JoinOptions if you want both.
+// Join them yourself with json.JoinOptions if you want both. No options
+// restores the default.
+//
+// To configure one direction only, see JSONMarshalOptions and
+// JSONUnmarshalOptions.
 func JSONOptions(opts ...json.Options) Option {
 	return func(c *Client) {
-		if len(opts) == 0 {
-			c.jsonOptions = defaultJSONOptions()
-			return
-		}
+		c.jsonMarshalOptions = joinOrDefault(opts)
+		c.jsonUnmarshalOptions = joinOrDefault(opts)
+	}
+}
 
-		c.jsonOptions = json.JoinOptions(opts...)
+// JSONMarshalOptions sets the encoding/json/v2 options used to encode request
+// payloads, leaving the decoding set alone. Options given replace the marshal
+// default, none restores it.
+//
+// It exists for policies that differ by direction, such as
+// jsontext.AllowInvalidUTF8(true) on the way out while decoding stays strict.
+func JSONMarshalOptions(opts ...json.Options) Option {
+	return func(c *Client) {
+		c.jsonMarshalOptions = joinOrDefault(opts)
+	}
+}
+
+// JSONUnmarshalOptions sets the encoding/json/v2 options used to decode response
+// bodies through Client.BindJSON and Client.ReadJSON, leaving the encoding set
+// alone. Options given replace the unmarshal default, none restores it.
+func JSONUnmarshalOptions(opts ...json.Options) Option {
+	return func(c *Client) {
+		c.jsonUnmarshalOptions = joinOrDefault(opts)
 	}
 }
 
 // defaultJSONOptions returns the v1-compatible option set.
 func defaultJSONOptions() json.Options {
 	return jsonv1.DefaultOptionsV1()
+}
+
+// joinOrDefault joins the given options, or returns the package default when
+// there are none. Given options replace the default, they are not merged with it.
+func joinOrDefault(opts []json.Options) json.Options {
+	if len(opts) == 0 {
+		return defaultJSONOptions()
+	}
+
+	return json.JoinOptions(opts...)
 }
 
 // encodeJSON writes "v" to "w" as JSON.

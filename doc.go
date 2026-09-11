@@ -30,6 +30,9 @@
 // io.EOF, which IsErrEmptyJSON also recognises, because several APIs answer a
 // successful write with no content.
 //
+// Call is for endpoints whose success body carries nothing: it reports failure
+// through the status alone and drains the body.
+//
 // A response status of 400 or above returns an APIError. Read it with GetError,
 // GetErrorCode, or decode its body with the generic BindError.
 //
@@ -44,10 +47,12 @@
 //
 // Client options, passed to New or Clone:
 //
-//	BaseURL, Timeout, DialTimeout, Transport, Handler, PersistentRequestOptions,
+//	BaseURL, Timeout, DialTimeout, Transport, Handler, OAuth2,
+//	PersistentRequestOptions,
 //	RateLimit, RateLimitPerMinute, RateLimitFor, RateLimitForPerMinute,
 //	RateLimiter, RateLimiterFor,
-//	Retry, RedactQueryParams, RedactHeaders, JSONOptions, Debug, NoOption
+//	Retry, RedactQueryParams, RedactHeaders,
+//	JSONOptions, JSONMarshalOptions, JSONUnmarshalOptions, Debug, NoOption
 //
 // Request options, passed to any request method:
 //

@@ -8,6 +8,8 @@ import (
 	"net/http"
 	"reflect"
 	"strconv"
+
+	json "encoding/json/v2"
 )
 
 // ReadJSON binds "dest" to the response's body.
@@ -41,10 +43,19 @@ func (c *Client) ReadJSON(ctx context.Context, dest any, method, urlpath string,
 	}
 
 	if dest != nil {
-		return decodeJSON(resp.Body, dest, c.jsonOptions)
+		return decodeJSON(resp.Body, dest, c.jsonUnmarshalOptions)
 	}
 
 	return nil
+}
+
+// Call sends the request and reports failure through the response status only:
+// a status of 400 or above returns an APIError, anything else succeeds and the
+// body is drained. Use it for endpoints whose success body carries nothing.
+//
+// It is ReadJSON with a nil destination: a non-nil payload is sent as JSON.
+func (c *Client) Call(ctx context.Context, method, urlpath string, payload any, opts ...RequestOption) error {
+	return c.ReadJSON(ctx, nil, method, urlpath, payload, opts...)
 }
 
 // checkDestination reports an error when "dest" cannot receive a decoded value.
@@ -144,20 +155,23 @@ func (c *Client) WriteTo(ctx context.Context, dest io.Writer, method, urlpath st
 // BindResponse consumes the response's body and binds the result to the "dest" pointer,
 // closing the response's body is up to the caller.
 //
+// The optional "opts" are the encoding/json/v2 options for a JSON body. They
+// replace the package default of encoding/json.DefaultOptionsV1().
+//
 // Deprecated: use the generic Bind instead, which cannot be handed a value of
 // the wrong kind.
-func BindResponse(resp *http.Response, dest any) error {
+func BindResponse(resp *http.Response, dest any, opts ...json.Options) error {
 	if err := checkDestination(dest); err != nil {
 		return err
 	}
 
-	return bindResponse(resp, dest, defaultJSONOptions())
+	return bindResponse(resp, dest, joinOrDefault(opts))
 }
 
 // bindResponse decodes "resp" into "dest" according to the response content type.
 // It is strict in order to catch bad actors fast, e.g. it won't try to read plain
 // text if that isn't what the response headers say.
-func bindResponse(resp *http.Response, dest any, opts jsonOptions) error {
+func bindResponse(resp *http.Response, dest any, opts json.Options) error {
 	contentType := trimHeader(resp.Header.Get(contentTypeKey))
 	switch contentType {
 	case contentTypeJSON: // the most common scenario on successful responses.

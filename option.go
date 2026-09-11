@@ -2,6 +2,7 @@ package httpclient
 
 import (
 	"context"
+	"log"
 	"net"
 	"net/http"
 	"net/http/httputil"
@@ -11,7 +12,7 @@ import (
 
 // All the builtin client options should live here, for easy discovery.
 // Rate limiting lives in ratelimit.go, redaction in redact.go,
-// retrying in retry.go and JSON configuration in json.go.
+// retrying in retry.go, JSON configuration in json.go and OAuth2 in oauth2.go.
 
 type Option = func(*Client)
 
@@ -98,6 +99,11 @@ func Transport(rt http.RoundTripper) Option {
 //
 // It replaces the Client's transport, so a DialTimeout given before it has no
 // effect and one given after it is ignored.
+//
+// The response is recorded in full before the Client sees a byte, so a
+// streaming handler (Server-Sent Events, chunked output) or a mid-response
+// cancellation cannot be exercised through it. For those cases use the
+// Transport option with an httptest.NewTestServer.
 func Handler(h http.Handler) Option {
 	return func(c *Client) {
 		c.HTTPClient.Transport = &handlerTransport{handler: h}
@@ -112,8 +118,20 @@ func PersistentRequestOptions(reqOpts ...RequestOption) Option {
 	}
 }
 
+// A DebugLogger receives the request and response dumps of the Debug option.
+// Most loggers satisfy it as written, for example *golog.Logger.
 type DebugLogger interface {
 	Debugf(string, ...any)
+}
+
+// DefaultDebugLogger is what Debug uses when handed a nil logger. It prints
+// through the standard log package, so log.SetOutput and log.SetFlags apply.
+var DefaultDebugLogger DebugLogger = stdDebugLogger{}
+
+type stdDebugLogger struct{}
+
+func (stdDebugLogger) Debugf(format string, args ...any) {
+	log.Printf("HTTP Client: "+format, args...)
 }
 
 // Debug enables the client's debug logger.
@@ -146,8 +164,14 @@ type DebugLogger interface {
 // Values of query parameters registered through RedactQueryParams,
 // and the credentials of any Authorization header, are replaced
 // by "REDACTED" in the output.
+//
+// A nil logger uses DefaultDebugLogger, the standard log package.
 func Debug(logger DebugLogger) Option {
 	return func(c *Client) {
+		if logger == nil {
+			logger = DefaultDebugLogger
+		}
+
 		handler := &debugRequestHandler{
 			logger: logger,
 			client: c,

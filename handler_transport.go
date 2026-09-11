@@ -9,6 +9,13 @@ import (
 )
 
 // See the "Handler" client option.
+//
+// Limitation: the recorder buffers the whole response, so the handler must
+// return before the client sees a single byte. Server-Sent Events, chunked
+// streaming and mid-response cancellation cannot be exercised through this
+// transport; the Flushed check below marks a flushed response as chunked, an
+// approximation of streaming, not streaming. httptest.NewTestServer, with its
+// in-memory network, is the replacement for those cases (see Transport).
 type handlerTransport struct {
 	handler http.Handler
 }

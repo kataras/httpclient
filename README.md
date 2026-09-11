@@ -59,6 +59,7 @@ Some of the features HTTP Client offers:
 * Rate limits, per client, per endpoint, or one budget shared by several clients
 * Retry with backoff
 * Query parameter and header redaction in errors and debug output
+* OAuth2 tokens through `golang.org/x/oauth2`
 * Middleware
 * JSON (read & write)
 * Forms
@@ -85,9 +86,41 @@ err := c.ReadJSON(ctx, &weather, http.MethodGet, "/current.json", nil, params)
 
 An empty response body comes back as `io.EOF`, which `IsErrEmptyJSON` also recognises. Several APIs answer a successful write with no content, so that is a normal outcome rather than a failure.
 
+`Call` is for endpoints whose success body carries nothing, a `DELETE` that answers 204 for instance. It returns the `APIError` on a status of 400 or above and nil otherwise, with the body drained.
+
+```go
+err := c.Call(ctx, http.MethodDelete, "/todos/42", nil)
+```
+
 ### Who closes the body
 
-`Do`, `JSON`, `Form` and `Uploader.Upload` hand you the `*http.Response` with its body still open. Closing it is your job, and `DrainResponseBody` is how to do it so the connection can be reused. The `Bind` and `Read` methods and `WriteTo` do it for you.
+`Do`, `JSON`, `Form` and `Uploader.Upload` hand you the `*http.Response` with its body still open. Closing it is your job, and `DrainResponseBody` is how to do it so the connection can be reused. The `Bind` and `Read` methods, `Call` and `WriteTo` do it for you.
+
+### JSON options
+
+Encoding and decoding run on `encoding/json/v2` with `encoding/json.DefaultOptionsV1()`, so field matching is case-insensitive and duplicate names are tolerated, as they were under the original package. `JSONOptions(opts...)` replaces that set for both directions. When the policy differs by direction, `JSONMarshalOptions` and `JSONUnmarshalOptions` set one side each:
+
+```go
+c := httpclient.New(
+	httpclient.JSONMarshalOptions(jsontext.AllowInvalidUTF8(true)), // a stray byte leaves as U+FFFD
+	httpclient.JSONUnmarshalOptions(json.RejectUnknownMembers(true)),
+)
+```
+
+`Bind`, `BindError`, `BindResponse` and `DecodeError` take the same options as a trailing argument.
+
+### OAuth2
+
+`OAuth2(src)` wraps the transport in an `oauth2.Transport` from `golang.org/x/oauth2`, so every request carries a token from `src`, cached and refreshed for you.
+
+```go
+c := httpclient.New(
+	httpclient.BaseURL(BaseURL),
+	httpclient.OAuth2(config.TokenSource(ctx, token)),
+)
+```
+
+Give `Transport`, `Handler` or `DialTimeout` before it, since it wraps whatever transport is set at that point. The token is added inside the transport, after `Debug` has dumped the request, so it never shows in debug output.
 
 ### Retries
 
@@ -166,6 +199,8 @@ c := httpclient.New(
 ```
 
 `RedactHeaders` adds header names to the list. `Authorization`, `Proxy-Authorization`, `Cookie` and `Set-Cookie` are always scrubbed, and a password in a URL is masked.
+
+`Debug` takes any logger with a `Debugf(string, ...any)` method. `Debug(nil)` prints through the standard `log` package.
 
 Request and response bodies are not scrubbed. There is no general way to find a secret inside one, so do not send a secret in a body and expect `Debug` to hide it.
 
