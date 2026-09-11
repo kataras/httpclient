@@ -1,5 +1,40 @@
 # Changelog
 
+## v0.1.1
+
+Additions only. Nothing in v0.1.0 changes behaviour or signature.
+
+### One rate limit budget across several Clients
+
+`RateLimit` and `RateLimitFor` build a limiter that belongs to one Client, and a `Clone` builds its own. That leaves no way to say "these two Clients share an upstream quota", which is what a host counting requests per IP address rather than per client enforces. Two Clients against such a host, each with `RateLimit(20)`, send up to 40 requests per second and the excess is dropped without an error.
+
+A limiter can now be built separately and handed to as many Clients as it covers:
+
+```go
+// The host allows 20 requests per second, whoever is asking.
+var hostLimiter = httpclient.NewRateLimiter(20)
+
+content := httpclient.New(
+    httpclient.BaseURL(host+"/rest"),
+    httpclient.RateLimiter(hostLimiter),
+)
+catalogue := httpclient.New(
+    httpclient.BaseURL(host),
+    httpclient.RateLimiter(hostLimiter),
+)
+```
+
+- `Limiter` is the new interface, one method, `Wait(ctx) error`. `*rate.Limiter` from `golang.org/x/time/rate` satisfies it as written, so the dependency stays out of the public API and a limiter of your own, a distributed one for instance, fits too. Implementations must be safe for concurrent use.
+- `NewRateLimiter(requestsPerSecond)` and `NewRateLimiterPerMinute(requestsPerMinute)` build one. Rates and bursts match the existing options exactly: `NewRateLimiter(20)` is 20/s with a burst of 20, `NewRateLimiterPerMinute(60)` is 1/s with a burst of 60. A value of zero or less returns nil.
+- `RateLimiter(l)` sets a `Limiter` you own as the client-wide one, in place of the one `RateLimit` builds. `RateLimiterFor(key, l)` does the same for a named limiter. A nil `Limiter` disables limiting, so `RateLimiter(nil)` clears anything set earlier in the chain, and `RateLimiterFor(key, nil)` removes the named one. A nil `*rate.Limiter` arriving inside a non-nil interface counts as nil rather than panicking on the first request.
+- **A `Clone` shares a limiter passed to `RateLimiter` or `RateLimiterFor`.** `Clone` replays the options and those options carry the instance you handed over. `RateLimit`, `RateLimitPerMinute`, `RateLimitFor` and `RateLimitForPerMinute` are unchanged: the clone still builds its own. The `Clone` and `RateLimitFor` docs, and the README, said flatly that a clone never shares, which is now only true of the rate-taking options.
+
+### Internals
+
+- The rate limit fields on `Client` hold a `Limiter` instead of a `*rate.Limiter`. Both are unexported, so this is not a breaking change. The rate arithmetic moved into the two constructors and `RateLimit`, `RateLimitPerMinute`, `RateLimitFor` and `RateLimitForPerMinute` are written on top of them.
+- `TestNewIsSafeWhileHandlersAreRegistered` registered 50 handlers on the package-level list that `RegisterRequestHandler` appends to and never put them back, so the suite only passed on a single run. Under `-count=2` the two tests asserting that a fresh `Client` carries no handlers saw the previous run's leftovers and failed. The test restores the list now, and the suite passes under `-count` and `-shuffle`.
+- The rate limit timing tests moved into a `testing/synctest` bubble, finishing the cleanup the retry tests had in v0.1.0. `ratelimit_test.go` was the last file asserting timing against the real clock with bounds like "under 500ms"; the assertions are exact now and the suite no longer spends about a second sleeping. `TestKeyedLimiterAppliesToEveryRetryAttempt` also stops reaching into the limiter with `SetBurst` and registers one built with the burst it wants.
+
 ## v0.1.0
 
 First release since v0.0.11. The v0.0.12 work was never tagged, so everything it added is listed here too.

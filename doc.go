@@ -46,6 +46,7 @@
 //
 //	BaseURL, Timeout, DialTimeout, Transport, Handler, PersistentRequestOptions,
 //	RateLimit, RateLimitPerMinute, RateLimitFor, RateLimitForPerMinute,
+//	RateLimiter, RateLimiterFor,
 //	Retry, RedactQueryParams, RedactHeaders, JSONOptions, Debug, NoOption
 //
 // Request options, passed to any request method:

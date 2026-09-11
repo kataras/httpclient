@@ -7,6 +7,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"slices"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -208,9 +209,31 @@ func TestRegisterRequestHandlerDoesNotLeakIntoOtherClients(t *testing.T) {
 	}
 }
 
+// keepDefaultRequestHandlers puts the package-level handler list back the way it
+// was when the test ends. The exported RegisterRequestHandler appends to a global
+// that nothing resets, by design, so a test calling it leaves every later New()
+// carrying its handlers. Without this the suite only passes on a single run:
+// under -count=2 the tests asserting that a fresh Client has no handlers see the
+// leftovers from the run before.
+func keepDefaultRequestHandlers(t *testing.T) {
+	t.Helper()
+
+	mu.Lock()
+	saved := slices.Clone(defaultRequestHandlers)
+	mu.Unlock()
+
+	t.Cleanup(func() {
+		mu.Lock()
+		defaultRequestHandlers = saved
+		mu.Unlock()
+	})
+}
+
 // TestNewIsSafeWhileHandlersAreRegistered is the race-detector case for the
 // unsynchronised read of the global handler slice. It only fails under -race.
 func TestNewIsSafeWhileHandlersAreRegistered(t *testing.T) {
+	keepDefaultRequestHandlers(t)
+
 	var wg sync.WaitGroup
 
 	wg.Add(2)

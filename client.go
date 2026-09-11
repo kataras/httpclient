@@ -11,8 +11,6 @@ import (
 	"slices"
 	"strings"
 
-	"golang.org/x/time/rate"
-
 	jsonv1 "encoding/json"
 )
 
@@ -28,11 +26,11 @@ type Client struct {
 	// A list of persistent request options.
 	PersistentRequestOptions []RequestOption
 
-	// Optional rate limiter instance initialized by the RateLimit option.
-	rateLimiter *rate.Limiter
+	// Optional rate limiter, see the RateLimit and RateLimiter options.
+	rateLimiter Limiter
 
-	// Optional named rate limiters, see the RateLimitFor option.
-	keyedLimiters map[string]*rate.Limiter
+	// Optional named rate limiters, see the RateLimitFor and RateLimiterFor options.
+	keyedLimiters map[string]Limiter
 
 	// Optional handlers that are being fired before and after each new request.
 	requestHandlers []RequestHandler
@@ -60,8 +58,8 @@ type Client struct {
 //   - Transport
 //   - Handler
 //   - PersistentRequestOptions
-//   - RateLimit, RateLimitPerMinute
-//   - RateLimitFor, RateLimitForPerMinute
+//   - RateLimit, RateLimitPerMinute, RateLimiter
+//   - RateLimitFor, RateLimitForPerMinute, RateLimiterFor
 //   - Retry
 //   - RedactQueryParams, RedactHeaders
 //   - JSONOptions
@@ -103,8 +101,13 @@ var NoOption = func(c *Client) { c.opts = c.opts[:0] /* clear previous options *
 // If you want to override the options from the base "c" Client,
 // use the NoOption variable as the 1st argument.
 //
-// The clone is independent: it builds its own rate limiters and carries
-// its own request handler list.
+// The clone carries its own request handler list, and it builds its own
+// limiters for the rates given to RateLimit, RateLimitPerMinute, RateLimitFor
+// and RateLimitForPerMinute, so parent and clone do not share those budgets.
+//
+// A Limiter handed to RateLimiter or RateLimiterFor is the exception. Clone
+// replays the options and that option carries the instance you passed, so the
+// clone shares the limiter, and the budget, with its parent.
 func (c *Client) Clone(opts ...Option) *Client {
 	// slices.Concat always allocates, so sibling clones cannot overwrite
 	// each other through a shared backing array.

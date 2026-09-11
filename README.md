@@ -56,7 +56,7 @@ func (c *Client) GetCurrentByCity(ctx context.Context, city string) (resp Respon
 Some of the features HTTP Client offers:
 
 * Typed responses through generic methods
-* Rate limits, per client or per endpoint
+* Rate limits, per client, per endpoint, or one budget shared by several clients
 * Retry with backoff
 * Query parameter and header redaction in errors and debug output
 * Middleware
@@ -123,7 +123,34 @@ results, err := c.BindJSON[Results](ctx, http.MethodGet, "/search", nil,
 	httpclient.RequestRateLimit("search"))
 ```
 
-A `Clone` builds its own limiters rather than sharing the parent's.
+A `Clone` builds its own limiters rather than sharing the parent's. When you want the opposite, read on.
+
+### One budget across several clients
+
+Sometimes one upstream quota covers more than one client. A host that allows 20 requests per second counts them per IP address, not per client, so two clients against that host with `RateLimit(20)` each can send 40 and have the excess dropped with no error.
+
+Build the limiter yourself and hand the same one to both:
+
+```go
+// The host allows 20 requests per second, whoever is asking.
+var hostLimiter = httpclient.NewRateLimiter(20)
+
+// Different path prefix, different API key, same quota.
+content := httpclient.New(
+	httpclient.BaseURL(host+"/rest"),
+	httpclient.RateLimiter(hostLimiter),
+)
+catalogue := httpclient.New(
+	httpclient.BaseURL(host),
+	httpclient.RateLimiter(hostLimiter),
+)
+```
+
+`RateLimiterFor(key, limiter)` does the same for a named limiter. Clients sharing a limiter share the budget behind it, even when they register it under different names.
+
+This is the one case where a `Clone` does share: the option carries the limiter you passed, and `Clone` replays the options, so the clone waits on the same one. `RateLimit` and `RateLimitFor` keep building a fresh limiter per clone.
+
+A `Limiter` is any type with `Wait(ctx) error`, so a distributed limiter of your own works here too. It has to be safe for concurrent use.
 
 ### Redacting secrets
 
