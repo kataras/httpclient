@@ -117,3 +117,31 @@ func TestDialTimeoutBuildsATransportWhenThereIsNone(t *testing.T) {
 		t.Fatal("DialTimeout did not set the dialer")
 	}
 }
+
+// TestDialTimeoutKeepsProxySettings: a bare &http.Transport{} has a nil Proxy,
+// which silently ignores HTTP_PROXY and friends that a plain client honours.
+// Anyone behind a corporate proxy lost it the moment they set a dial timeout.
+//
+// The assertion is on the wiring, not on a resolved address: net/http caches
+// the environment proxy the first time it is read, so a value based check
+// would depend on the order the tests run in.
+func TestDialTimeoutKeepsProxySettings(t *testing.T) {
+	client := New(DialTimeout(3 * time.Second))
+
+	transport, ok := client.HTTPClient.Transport.(*http.Transport)
+	if !ok {
+		t.Fatalf("expected an *http.Transport, got %T", client.HTTPClient.Transport)
+	}
+
+	if transport.Proxy == nil {
+		t.Fatal("DialTimeout turned off proxy support")
+	}
+
+	// The other defaults of http.DefaultTransport should survive too.
+	if transport.MaxIdleConns == 0 {
+		t.Fatal("DialTimeout discarded the default connection pool settings")
+	}
+	if transport.TLSHandshakeTimeout == 0 {
+		t.Fatal("DialTimeout discarded the default TLS handshake timeout")
+	}
+}

@@ -82,7 +82,7 @@ Every call sharing a key shares the budget, and the wait happens on every retry 
 - `WriteTo` closed the response body without draining it, leaving the connection unusable after an early copy error.
 - `Uploader.Upload` closed the multipart writer, so a second call sent a body with no closing boundary. It returns `ErrUploaderClosed` now.
 - `RateLimit(0)` and `RateLimitPerMinute(0)` built a limiter with a burst of zero, which rejected every request. They disable limiting, as documented.
-- `DialTimeout` replaced the whole transport. It now sets the dialer on an existing `*http.Transport` and leaves a custom `RoundTripper` alone.
+- `DialTimeout` replaced the whole transport with a bare `&http.Transport{}`, whose nil `Proxy` field silently turned off `HTTP_PROXY`, `HTTPS_PROXY` and `NO_PROXY`, along with the connection pool and TLS timeouts. It now clones `http.DefaultTransport`, sets the dialer on an existing `*http.Transport`, and leaves a custom `RoundTripper` alone.
 - The `Timeout` doc claimed a 15 second default that never existed. There is no default; the doc says so rather than a timeout appearing under long downloads.
 - The unused `keepAlive` field is gone. Its type assertion never succeeded for the default transport anyway.
 

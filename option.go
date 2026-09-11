@@ -47,8 +47,9 @@ func Timeout(timeout time.Duration) Option {
 // dial, such that each is given an appropriate fraction of the time
 // to connect.
 //
-// It sets the dialer of the Client's *http.Transport, creating one when the
-// Client has no transport yet. A Client whose transport is not an
+// It sets the dialer of the Client's *http.Transport, cloning
+// http.DefaultTransport when the Client has no transport yet, so proxy
+// settings and pool defaults are kept. A Client whose transport is not an
 // *http.Transport, such as one built by the Handler option, is left alone.
 func DialTimeout(timeout time.Duration) Option {
 	return func(c *Client) {
@@ -56,7 +57,13 @@ func DialTimeout(timeout time.Duration) Option {
 
 		switch transport := c.HTTPClient.Transport.(type) {
 		case nil:
-			c.HTTPClient.Transport = &http.Transport{DialContext: dialer.DialContext}
+			// Clone the default transport rather than building a bare one:
+			// a bare *http.Transport has a nil Proxy, which silently turns off
+			// the HTTP_PROXY, HTTPS_PROXY and NO_PROXY variables that a plain
+			// client honours, along with the connection pool defaults.
+			cloned := http.DefaultTransport.(*http.Transport).Clone()
+			cloned.DialContext = dialer.DialContext
+			c.HTTPClient.Transport = cloned
 		case *http.Transport:
 			// Keep whatever else was configured on it.
 			transport.DialContext = dialer.DialContext
