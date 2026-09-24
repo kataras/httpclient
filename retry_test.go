@@ -244,6 +244,22 @@ func TestRetryTransportErrorsOnlyForIdempotentMethods(t *testing.T) {
 		}
 	})
 
+	t.Run("QUERY is retried and its body replayed", func(t *testing.T) {
+		srv := newFlakyServer(t)
+		client := New(BaseURL(srv.URL), Retry(fastRetry(3)))
+		tr := &failNTransport{n: 1, next: http.DefaultTransport}
+		client.HTTPClient.Transport = tr
+		if err := client.ReadJSON(defaultCtx, nil, "QUERY", "/", []byte(`{"term":"go"}`)); err != nil {
+			t.Fatalf("expected success after a transport error, got %v", err)
+		}
+		if tr.calls.Load() != 2 {
+			t.Fatalf("expected 2 round trips, got %d", tr.calls.Load())
+		}
+		if got := srv.recordedBodies(); len(got) != 1 || got[0] != `{"term":"go"}` {
+			t.Fatalf("expected the body to reach the server once, intact, got %q", got)
+		}
+	})
+
 	t.Run("POST is not retried by default", func(t *testing.T) {
 		client := New(BaseURL(srv.URL), Retry(fastRetry(3)))
 		tr := &failNTransport{n: 1, next: http.DefaultTransport}

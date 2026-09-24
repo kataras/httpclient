@@ -124,7 +124,7 @@ Give `Transport`, `Handler` or `DialTimeout` before it, since it wraps whatever 
 
 ### Retries
 
-Retrying is opt-in. Pass a `RetryPolicy` and failed attempts are repeated with exponential backoff (a `Retry-After` response header wins when present). By default only network errors on idempotent methods and the 429, 502, 503 and 504 statuses are retried; buffered request bodies are replayed automatically.
+Retrying is opt-in. Pass a `RetryPolicy` and failed attempts are repeated with exponential backoff (a `Retry-After` response header wins when present). By default only network errors on idempotent methods (GET, HEAD, OPTIONS, TRACE, PUT, DELETE and QUERY) and the 429, 502, 503 and 504 statuses are retried; buffered request bodies are replayed automatically.
 
 ```go
 c := httpclient.New(

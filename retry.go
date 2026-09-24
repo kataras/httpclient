@@ -46,7 +46,8 @@ type RetryPolicy struct {
 	// takes precedence over the exponential backoff.
 	MaxRetryAfter time.Duration
 	// RetryNonIdempotent allows retrying POST, PATCH and other non-idempotent
-	// methods after a transport error. Retries on a received response status
+	// methods (GET, HEAD, OPTIONS, TRACE, PUT, DELETE and QUERY are idempotent)
+	// after a transport error. Retries on a received response status
 	// are always allowed, since the server did process the request.
 	RetryNonIdempotent bool
 	// OnRetry, when set, is called right before each wait with the attempt number
@@ -127,14 +128,18 @@ func (p RetryPolicy) shouldRetry(req *http.Request, resp *http.Response, err err
 	return false
 }
 
-// isIdempotent follows RFC 9110 section 9.2.2.
+// methodQuery is the RFC 10008 QUERY method: safe and idempotent, with a body.
+// It becomes http.MethodQuery once go.mod requires Go 1.28.
+const methodQuery = "QUERY"
+
+// isIdempotent follows RFC 9110 section 9.2.2, plus QUERY (RFC 10008).
 func isIdempotent(req *http.Request) bool {
 	if req == nil {
 		return false
 	}
 
 	switch req.Method {
-	case http.MethodGet, http.MethodHead, http.MethodOptions, http.MethodTrace, http.MethodPut, http.MethodDelete, "":
+	case http.MethodGet, http.MethodHead, http.MethodOptions, http.MethodTrace, http.MethodPut, http.MethodDelete, methodQuery, "":
 		return true
 	default:
 		return false

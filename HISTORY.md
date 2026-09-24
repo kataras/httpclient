@@ -1,5 +1,9 @@
 # Changelog
 
+## Next
+
+- `RetryPolicy` treats QUERY (RFC 10008) as idempotent, so a QUERY request that hits a transport error is retried, with its body replayed, without `RetryNonIdempotent`. QUERY is a safe method that carries a body, the shape of a search or a filtered list. The package spells it as the string `"QUERY"` until `go.mod` moves to Go 1.28, which adds `http.MethodQuery`.
+
 ## v0.2.0
 
 First release since v0.0.11. The v0.0.12 work was never tagged, so everything it added is listed here too.
